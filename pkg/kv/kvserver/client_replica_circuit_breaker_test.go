@@ -442,7 +442,7 @@ func TestReplicaCircuitBreaker_RangeFeed(t *testing.T) {
 	defer cancel()
 	stream1 := &dummyStream{t: t, ctx: ctx, name: "rangefeed1", recv: make(chan *roachpb.RangeFeedEvent)}
 	require.NoError(t, tc.Stopper().RunAsyncTask(ctx, "stream1", func(ctx context.Context) {
-		err := tc.repls[0].RangeFeed(args, stream1).GoError()
+		err := tc.repls[0].RangeFeed(args, stream1, nil /* pacer */).GoError()
 		if ctx.Err() != nil {
 			return // main goroutine stopping
 		}
@@ -496,7 +496,7 @@ func TestReplicaCircuitBreaker_RangeFeed(t *testing.T) {
 	// the breaker.
 	stream2 := &dummyStream{t: t, ctx: ctx, name: "rangefeed2", recv: make(chan *roachpb.RangeFeedEvent)}
 	require.NoError(t, tc.Stopper().RunAsyncTask(ctx, "stream2", func(ctx context.Context) {
-		err := tc.repls[0].RangeFeed(args, stream2).GoError()
+		err := tc.repls[0].RangeFeed(args, stream2, nil /* pacer */).GoError()
 		if ctx.Err() != nil {
 			return // main goroutine stopping
 		}
@@ -706,10 +706,10 @@ func setupCircuitBreakerTest(t *testing.T) *circuitBreakerTest {
 		// n1. However, we don't control raft leadership placement and without this knob,
 		// n1 may refuse to acquire the lease, which we don't want.
 		AllowLeaseRequestProposalsWhenNotLeader: true,
-		// The TestingApplyFilter prevents n2 from requesting a lease (or from the lease
+		// The TestingApplyCalledTwiceFilter prevents n2 from requesting a lease (or from the lease
 		// being transferred to n2). The test seems to pass pretty reliably without this
 		// but it can't hurt.
-		TestingApplyFilter: func(args kvserverbase.ApplyFilterArgs) (int, *roachpb.Error) {
+		TestingApplyCalledTwiceFilter: func(args kvserverbase.ApplyFilterArgs) (int, *roachpb.Error) {
 			if !args.IsLeaseRequest {
 				return 0, nil
 			}

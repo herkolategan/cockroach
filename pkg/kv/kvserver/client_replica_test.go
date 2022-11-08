@@ -164,6 +164,7 @@ func TestLeaseholdersRejectClockUpdateWithJump(t *testing.T) {
 			Server: &server.TestingKnobs{
 				WallClock: manual,
 			},
+			Store: &kvserver.StoreTestingKnobs{DisableCanAckBeforeApplication: true},
 		},
 	})
 	s := serv.(*server.TestServer)
@@ -1019,7 +1020,7 @@ func TestTxnReadWithinUncertaintyIntervalAfterRangeMerge(t *testing.T) {
 		require.NoError(t, tc.Server(0).DB().AdminMerge(ctx, keyA))
 
 		if alsoSplit {
-			require.NoError(t, tc.Server(0).DB().AdminSplit(ctx, keyC, hlc.MaxTimestamp))
+			require.NoError(t, tc.Server(0).DB().AdminSplit(ctx, keyC, hlc.MaxTimestamp, roachpb.AdminSplitRequest_INGESTION))
 		}
 
 		// Try and read the transaction from the context of a new transaction. This
@@ -2769,7 +2770,13 @@ func TestClearRange(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	serv, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	serv, _, _ := serverutils.StartServer(t, base.TestServerArgs{
+		Knobs: base.TestingKnobs{Store: &kvserver.StoreTestingKnobs{
+			// This makes sure that our writes are visible when we go
+			// straight to the engine to check them.
+			DisableCanAckBeforeApplication: true,
+		}},
+	})
 	s := serv.(*server.TestServer)
 	defer s.Stopper().Stop(ctx)
 	store, err := s.Stores().GetStore(s.GetFirstStoreID())
@@ -4000,7 +4007,7 @@ func TestChangeReplicasLeaveAtomicRacesWithMerge(t *testing.T) {
 		err = db.AdminMerge(ctx, lhs)
 		require.NoError(t, err)
 		if resplit {
-			require.NoError(t, db.AdminSplit(ctx, rhs, hlc.Timestamp{WallTime: math.MaxInt64}))
+			require.NoError(t, db.AdminSplit(ctx, rhs, hlc.Timestamp{WallTime: math.MaxInt64}, roachpb.AdminSplitRequest_INGESTION))
 			err = tc.WaitForSplitAndInitialization(rhs)
 			require.NoError(t, err)
 		}

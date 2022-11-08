@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -251,6 +252,12 @@ func (rts *registryTestSuite) setUp(t *testing.T) {
 			TraceRealSpan: rts.traceRealSpan,
 			OnResume: func(ctx context.Context) error {
 				t.Log("Starting resume")
+				l, ok := pprof.Label(ctx, "job")
+				assert.True(t, ok)
+				assert.Contains(t, l, fmt.Sprintf("%d", job.ID()))
+				payload := job.Payload()
+				jobType := payload.Type().String()
+				assert.Contains(t, l, jobType)
 				if rts.traceRealSpan {
 					// Add a dummy recording so we actually see something in the trace.
 					span := tracing.SpanFromContext(ctx)
@@ -2348,14 +2355,11 @@ func TestJobInTxn(t *testing.T) {
 			}
 			fn := func(ctx context.Context, _ []sql.PlanNode, _ chan<- tree.Datums) error {
 				var err error
-				job, err = execCtx.ExtendedEvalContext().QueueJob(
-					ctx,
-					jobs.Record{
-						Description: st.String(),
-						Details:     jobspb.BackupDetails{},
-						Progress:    jobspb.BackupProgress{},
-					},
-				)
+				job, err = execCtx.ExtendedEvalContext().QueueJob(ctx, execCtx.Txn(), jobs.Record{
+					Description: st.String(),
+					Details:     jobspb.BackupDetails{},
+					Progress:    jobspb.BackupProgress{},
+				})
 				return err
 			}
 			return fn, nil, nil, false, nil
@@ -2390,14 +2394,11 @@ func TestJobInTxn(t *testing.T) {
 			}
 			fn := func(ctx context.Context, _ []sql.PlanNode, _ chan<- tree.Datums) error {
 				var err error
-				job, err = execCtx.ExtendedEvalContext().QueueJob(
-					ctx,
-					jobs.Record{
-						Description: "RESTORE",
-						Details:     jobspb.RestoreDetails{},
-						Progress:    jobspb.RestoreProgress{},
-					},
-				)
+				job, err = execCtx.ExtendedEvalContext().QueueJob(ctx, execCtx.Txn(), jobs.Record{
+					Description: "RESTORE",
+					Details:     jobspb.RestoreDetails{},
+					Progress:    jobspb.RestoreProgress{},
+				})
 				return err
 			}
 			return fn, nil, nil, false, nil
