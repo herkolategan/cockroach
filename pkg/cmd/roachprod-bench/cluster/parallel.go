@@ -14,67 +14,68 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod-bench"
-	"io"
-	"os"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachprod"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
+// RemoteCommand is a command to be executed on a remote node. The Metadata field is used to
+// provide additional information to the original caller.
 type RemoteCommand struct {
-	command  []string
-	metadata interface{}
+	Args     []string
+	Metadata interface{}
 }
 
+// RemoteResponse is the response to a RemoteCommand.
 type RemoteResponse struct {
 	RemoteCommand
-	stdout   string
-	stderr   string
-	err      error
-	duration time.Duration
+	Stdout   string
+	Stderr   string
+	Err      error
+	Duration time.Duration
 }
 
-func roachprodRunWithOutput(clusterName string, cmdArray []string) (string, string, error) {
+func roachprodRunWithOutput(
+	log *logger.Logger, clusterName string, cmdArray []string,
+) (string, string, error) {
 	bufOut, bufErr := new(bytes.Buffer), new(bytes.Buffer)
-	var stdout, stderr io.Writer
-	if *main.flagVerbose {
-		stdout = io.MultiWriter(os.Stdout, bufOut)
-		stderr = io.MultiWriter(os.Stderr, bufErr)
-	} else {
-		stdout = bufOut
-		stderr = bufErr
-	}
-	err := roachprod.Run(context.Background(), main.l, clusterName, "", "", false, stdout, stderr, cmdArray)
+	err := roachprod.Run(context.Background(), log, clusterName, "", "", false, bufOut, bufErr, cmdArray)
 	return bufOut.String(), bufErr.String(), err
 }
 
-func remoteWorker(clusterNode string, receive chan remoteCommand, response chan remoteResponse) {
+func remoteWorker(
+	log *logger.Logger, clusterNode string, receive chan RemoteCommand, response chan RemoteResponse,
+) {
 	for {
 		command := <-receive
-		if command.command == nil {
+		if command.Args == nil {
 			return
 		}
 		start := timeutil.Now()
-		stdout, stderr, err := roachprodRunWithOutput(clusterNode, command.command)
+		stdout, stderr, err := roachprodRunWithOutput(log, clusterNode, command.Args)
 		duration := timeutil.Since(start)
-		response <- remoteResponse{command, stdout, stderr, err, duration}
+		response <- RemoteResponse{command, stdout, stderr, err, duration}
 	}
 }
 
+// ExecuteRemoteCommands distributes the commands to the cluster nodes and waits for the responses.
+// Only one command is executed per node at a time. The commands are executed in the order they are
+// provided. The failFast parameter indicates whether the execution should stop on the first error.
 func ExecuteRemoteCommands(
+	log *logger.Logger,
 	cluster string,
-	commands []remoteCommand,
+	commands []RemoteCommand,
 	numNodes int,
 	failFast bool,
-	callback func(response remoteResponse),
+	callback func(response RemoteResponse),
 ) {
-	workChannel := make(chan remoteCommand, numNodes)
-	responseChannel := make(chan remoteResponse, numNodes)
+	workChannel := make(chan RemoteCommand, numNodes)
+	responseChannel := make(chan RemoteResponse, numNodes)
 
 	for idx := 1; idx <= numNodes; idx++ {
-		go remoteWorker(fmt.Sprintf("%s:%d", cluster, idx), workChannel, responseChannel)
+		go remoteWorker(log, fmt.Sprintf("%s:%d", cluster, idx), workChannel, responseChannel)
 	}
 
 	responsesRemaining := 0
@@ -87,7 +88,7 @@ out:
 		case response := <-responseChannel:
 			responsesRemaining--
 			callback(response)
-			if response.err != nil && failFast {
+			if response.Err != nil && failFast {
 				break out
 			}
 		default:

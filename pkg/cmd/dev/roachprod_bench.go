@@ -29,6 +29,7 @@ import (
 const (
 	benchArgsFlag = "bench-args"
 	compressFlag  = "compress"
+	buildHashFlag = "build-hash"
 	batchSize     = 128
 )
 
@@ -42,8 +43,10 @@ func makeRoachprodBenchCmd(runE func(cmd *cobra.Command, args []string) error) *
 		RunE:    runE,
 	}
 	roachprodBenchCmd.Flags().String(benchArgsFlag, "", "additional arguments to pass to roachbench")
+	roachprodBenchCmd.Flags().String(benchArgsFlag, "", "additional arguments to pass to roachbench")
 	roachprodBenchCmd.Flags().String(volumeFlag, "bzlhome", "the Docker volume to use as the container home directory (only used for cross builds)")
 	roachprodBenchCmd.Flags().String(clusterFlag, "", "the name of the cluster (must be set)")
+	roachprodBenchCmd.Flags().String(buildHashFlag, "", "override the hash for the build output")
 	roachprodBenchCmd.Flags().Bool(raceFlag, false, "run tests using race builds")
 	roachprodBenchCmd.Flags().Bool(compressFlag, false, "compress the output of the benchmarks binaries")
 
@@ -58,6 +61,7 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 		benchArgs = mustGetFlagString(cmd, benchArgsFlag)
 		race      = mustGetFlagBool(cmd, raceFlag)
 		comress   = mustGetFlagBool(cmd, compressFlag)
+		buildHash = mustGetFlagString(cmd, buildHashFlag)
 	)
 
 	workspace, err := d.getWorkspace(ctx)
@@ -99,18 +103,20 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 		testTargets = append(testTargets, testTarget)
 	}
 
-	// Generate a unique build hash for the given targets and git revision.
-	stdout, err := d.exec.CommandContextSilent(ctx, "git", "rev-parse", "HEAD")
-	if err != nil {
-		return err
+	// Generate a unique build hash, if none is given, from the targets and git revision.
+	if buildHash == "" {
+		stdout, err := d.exec.CommandContextSilent(ctx, "git", "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		gitRevision := strings.TrimSpace(string(stdout))
+		buildHashMD5 := md5.New()
+		buildHashMD5.Write([]byte(gitRevision))
+		for _, target := range testTargets {
+			buildHashMD5.Write([]byte(target))
+		}
+		buildHash = hex.EncodeToString(buildHashMD5.Sum(nil)[:])[:8]
 	}
-	gitRevision := strings.TrimSpace(string(stdout))
-	buildHash := md5.New()
-	buildHash.Write([]byte(gitRevision))
-	for _, target := range testTargets {
-		buildHash.Write([]byte(target))
-	}
-	buildHashHex := hex.EncodeToString(buildHash.Sum(nil)[:])[:8]
 
 	// Assume that we need LibGEOS.
 	if err = d.buildGeos(ctx, volume); err != nil {
@@ -118,7 +124,7 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 	}
 
 	// Setup output destinations, and clear any old artifacts.
-	outputPrefix := fmt.Sprintf("roachbench/%s", buildHashHex)
+	outputPrefix := fmt.Sprintf("roachbench/%s", buildHash)
 	binTar := fmt.Sprintf("artifacts/%s/bin.tar", outputPrefix)
 	_, _ = d.os.Remove(binTar), d.os.Remove(binTar+".gz")
 
@@ -196,7 +202,7 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 		}
 	}
 
-	roachprodBenchArgs := []string{fmt.Sprintf("./artifacts/%s", outputPrefix), cluster, "-libdir", libdir}
+	roachprodBenchArgs := []string{fmt.Sprintf("./artifacts/%s", outputPrefix), "-cluster", cluster, "-libdir", libdir}
 	roachprodBenchArgs = append(roachprodBenchArgs, strings.Fields(benchArgs)...)
 	roachprodBenchArgs = append(roachprodBenchArgs, "--")
 	roachprodBenchArgs = append(roachprodBenchArgs, testArgs...)

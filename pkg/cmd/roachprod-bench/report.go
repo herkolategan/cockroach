@@ -16,7 +16,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod-bench/cluster"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
+)
+
+const (
+	reportLogName    = "report"
+	analyticsLogName = "analytics"
 )
 
 var (
@@ -34,19 +40,21 @@ func initLogger() {
 	}
 }
 
-func openReports(packages []string) error {
+func getReportLogName(name string, pkg string) string {
+	pkgFormatted := strings.ReplaceAll(pkg, "/", "-")
+	return fmt.Sprintf("%s-%s.log", pkgFormatted, name)
+}
+
+func createReports(packages []string) error {
 	benchmarkOutput = make(map[string]*os.File)
 	analyticsOutput = make(map[string]*os.File)
 	var err error
 	for _, pkg := range packages {
-		pkgFormatted := strings.ReplaceAll(pkg, "/", "-")
-		benchmarkOutput[pkg], err = os.Create(filepath.Join(logOutputDir,
-			fmt.Sprintf("%s-report.log", pkgFormatted)))
+		benchmarkOutput[pkg], err = os.Create(filepath.Join(logOutputDir, getReportLogName(reportLogName, pkg)))
 		if err != nil {
 			return err
 		}
-		analyticsOutput[pkg], err = os.Create(filepath.Join(logOutputDir,
-			fmt.Sprintf("%s-analytics.log", pkgFormatted)))
+		analyticsOutput[pkg], err = os.Create(filepath.Join(logOutputDir, getReportLogName(analyticsLogName, pkg)))
 		if err != nil {
 			return err
 		}
@@ -69,8 +77,8 @@ func closeReports() {
 	}
 }
 
-func writeBenchmarkErrorLogs(response remoteResponse, index int) error {
-	benchmarkResponse := response.metadata.(benchmark)
+func writeBenchmarkErrorLogs(response cluster.RemoteResponse, index int) error {
+	benchmarkResponse := response.Metadata.(benchmark)
 	stdoutLogName := fmt.Sprintf("%s-%d-stdout.log", benchmarkResponse.name, index)
 	stderrLogName := fmt.Sprintf("%s-%d-stderr.log", benchmarkResponse.name, index)
 	l.Printf("Writing error logs for benchmark at %s, %s\n", stdoutLogName, stderrLogName)
@@ -93,17 +101,17 @@ func writeBenchmarkErrorLogs(response remoteResponse, index int) error {
 		}
 	}()
 
-	_, err = stdoutFile.WriteString(response.stdout)
+	_, err = stdoutFile.WriteString(response.Stdout)
 	if err != nil {
 		return err
 	}
 
 	var buffer strings.Builder
-	buffer.WriteString(fmt.Sprintf("Remote command: %s\n", strings.Join(response.command, " ")))
-	if response.err != nil {
-		buffer.WriteString(fmt.Sprintf("Remote error: %s\n", response.err))
+	buffer.WriteString(fmt.Sprintf("Remote command: %s\n", strings.Join(response.Args, " ")))
+	if response.Err != nil {
+		buffer.WriteString(fmt.Sprintf("Remote error: %s\n", response.Err))
 	}
-	buffer.WriteString(response.stderr)
+	buffer.WriteString(response.Stderr)
 	_, err = stderrFile.WriteString(buffer.String())
 	if err != nil {
 		return err

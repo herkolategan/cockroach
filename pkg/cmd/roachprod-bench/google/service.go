@@ -304,7 +304,9 @@ func (srv *Service) createOverviewSheet(rawInfos []rawSheetInfo) *sheets.Sheet {
 	return pivot
 }
 
-func (srv *Service) createSheet(ctx context.Context, s sheets.Spreadsheet) (*sheets.Spreadsheet, error) {
+func (srv *Service) createSheet(
+	ctx context.Context, s sheets.Spreadsheet,
+) (*sheets.Spreadsheet, error) {
 	res, err := srv.sheets.Spreadsheets.Create(&s).Context(ctx).Do()
 	if err != nil {
 		return nil, errors.Wrap(err, "create new Spreadsheet")
