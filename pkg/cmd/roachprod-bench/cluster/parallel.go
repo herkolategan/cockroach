@@ -8,12 +8,13 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package main
+package cluster
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod-bench"
 	"io"
 	"os"
 	"time"
@@ -22,14 +23,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
-type remoteCommand struct {
+type RemoteCommand struct {
 	command  []string
 	metadata interface{}
 }
 
-type remoteResponse struct {
-	command  []string
-	metadata interface{}
+type RemoteResponse struct {
+	RemoteCommand
 	stdout   string
 	stderr   string
 	err      error
@@ -39,14 +39,14 @@ type remoteResponse struct {
 func roachprodRunWithOutput(clusterName string, cmdArray []string) (string, string, error) {
 	bufOut, bufErr := new(bytes.Buffer), new(bytes.Buffer)
 	var stdout, stderr io.Writer
-	if *flagVerbose {
+	if *main.flagVerbose {
 		stdout = io.MultiWriter(os.Stdout, bufOut)
 		stderr = io.MultiWriter(os.Stderr, bufErr)
 	} else {
 		stdout = bufOut
 		stderr = bufErr
 	}
-	err := roachprod.Run(context.Background(), l, clusterName, "", "", false, stdout, stderr, cmdArray)
+	err := roachprod.Run(context.Background(), main.l, clusterName, "", "", false, stdout, stderr, cmdArray)
 	return bufOut.String(), bufErr.String(), err
 }
 
@@ -59,11 +59,11 @@ func remoteWorker(clusterNode string, receive chan remoteCommand, response chan 
 		start := timeutil.Now()
 		stdout, stderr, err := roachprodRunWithOutput(clusterNode, command.command)
 		duration := timeutil.Since(start)
-		response <- remoteResponse{command.command, command.metadata, stdout, stderr, err, duration}
+		response <- remoteResponse{command, stdout, stderr, err, duration}
 	}
 }
 
-func executeRemoteCommands(
+func ExecuteRemoteCommands(
 	cluster string,
 	commands []remoteCommand,
 	numNodes int,
