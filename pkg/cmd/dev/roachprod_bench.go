@@ -43,7 +43,6 @@ func makeRoachprodBenchCmd(runE func(cmd *cobra.Command, args []string) error) *
 		RunE:    runE,
 	}
 	roachprodBenchCmd.Flags().String(benchArgsFlag, "", "additional arguments to pass to roachbench")
-	roachprodBenchCmd.Flags().String(benchArgsFlag, "", "additional arguments to pass to roachbench")
 	roachprodBenchCmd.Flags().String(volumeFlag, "bzlhome", "the Docker volume to use as the container home directory (only used for cross builds)")
 	roachprodBenchCmd.Flags().String(clusterFlag, "", "the name of the cluster (must be set)")
 	roachprodBenchCmd.Flags().String(buildHashFlag, "", "override the hash for the build output")
