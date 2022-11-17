@@ -243,7 +243,7 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 		}
 	}
 
-	roachprodBenchArgs := []string{fmt.Sprintf("./artifacts/%s", outputPrefix), cluster, "-libdir", libdir}
+	roachprodBenchArgs := []string{fmt.Sprintf("./artifacts/%s", outputPrefix), "-cluster", cluster, "-libdir", libdir}
 	roachprodBenchArgs = append(roachprodBenchArgs, strings.Fields(benchArgs)...)
 	roachprodBenchArgs = append(roachprodBenchArgs, "--")
 	roachprodBenchArgs = append(roachprodBenchArgs, testArgs...)
@@ -368,7 +368,12 @@ func compressFile(filePath string) (err error) {
 			err = closeErr
 		}
 	}()
-	_, err = io.Copy(pgzip.NewWriter(compressedFile), binTarFile)
+	writer := pgzip.NewWriter(compressedFile)
+	_, err = io.Copy(writer, binTarFile)
+	if err != nil {
+		return
+	}
+	err = writer.Close()
 	return
 }
 
