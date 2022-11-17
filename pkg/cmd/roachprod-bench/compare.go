@@ -28,7 +28,7 @@ import (
 func compareBenchmarks(
 	packages []string,
 	currentDir, previousDir string,
-	outputResult func(pkgGroup string, tables []*benchstat.Table) error,
+	outputResult func(pkgGroup string, tables []*benchstat.Table) error, // TODO: just return the results... no need for function anymore
 ) error {
 	packageResults := make(map[string][][]*benchfmt.Result)
 	for _, pkg := range packages {
@@ -51,7 +51,7 @@ func compareBenchmarks(
 		c.Alpha = 0.05
 		c.Order = benchstat.Reverse(benchstat.ByDelta)
 		c.AddResults("new", results[0])
-		c.AddResults("odl", results[1])
+		c.AddResults("old", results[1])
 		tables := c.Tables()
 		if err := outputResult(pkgGroup, tables); err != nil {
 			return err

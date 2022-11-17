@@ -12,17 +12,20 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"text/template"
 
 	"github.com/alessio/shellescape"
 	bazelutil "github.com/cockroachdb/cockroach/pkg/build/util"
+	"github.com/klauspost/pgzip"
 	"github.com/spf13/cobra"
 )
 
@@ -30,37 +33,78 @@ const (
 	benchArgsFlag = "bench-args"
 	compressFlag  = "compress"
 	buildHashFlag = "build-hash"
-	batchSize     = 128
+	batchSizeFlag = "batch-size"
 )
+
+type packageTemplateData struct {
+	RunfilesDirName string
+	TargetBinName   string
+}
+
+type stageOutputTemplateData struct {
+	packageTemplateData
+	BazelOutputDir string
+	StageDir       string
+	TargetName     string
+	RunScript      string
+}
+
+type runTemplateData struct {
+	packageTemplateData
+	PackageDir string
+}
+
+const stageOutputTemplateScript = `
+mkdir -p #{.StageDir#}
+cp -Lr #{.BazelOutputDir#}/#{.RunfilesDirName#} #{.StageDir#}/#{.RunfilesDirName#}
+cp -Lr #{.BazelOutputDir#}/#{.TargetBinName#} #{.StageDir#}/#{.TargetBinName#}
+
+echo #{shesc .RunScript#} > #{.StageDir#}/run.sh
+chmod +x #{.StageDir#}/run.sh
+
+echo "Successfully staged target #{.TargetName#}"
+`
+
+const runTemplateScript = `
+export RUNFILES_DIR=$(pwd)/#{.RunfilesDirName#}
+export TEST_WORKSPACE=com_github_cockroachdb_cockroach/#{.PackageDir#}
+
+find . -maxdepth 1 -type l -delete
+ln -f -s ./#{.RunfilesDirName#}/com_github_cockroachdb_cockroach/#{.PackageDir#}/* .
+./#{.TargetBinName#} "$@"
+`
 
 func makeRoachprodBenchCmd(runE func(cmd *cobra.Command, args []string) error) *cobra.Command {
 	roachprodBenchCmd := &cobra.Command{
-		Use:     "roachprod-bench <pkg>",
-		Short:   "run the given benchmarks on the given roachprod cluster",
-		Long:    "run the given benchmarks on the given roachprod cluster.",
-		Example: `dev roachprod-bench ./pkg/sql/importer --cluster my_cluster`,
+		Use:     "roachprod-bench-wrapper <pkg>",
+		Short:   "invokes pkg/cmd/roachprod-bench to parallelize execution of specified microbenchmarks",
+		Long:    "invokes pkg/cmd/roachprod-bench to parallelize execution of specified microbenchmarks",
+		Example: `dev roachprod-bench-wrapper ./pkg/sql/importer --cluster my_cluster`,
 		Args:    cobra.MinimumNArgs(1),
 		RunE:    runE,
 	}
 	roachprodBenchCmd.Flags().String(benchArgsFlag, "", "additional arguments to pass to roachbench")
 	roachprodBenchCmd.Flags().String(volumeFlag, "bzlhome", "the Docker volume to use as the container home directory (only used for cross builds)")
 	roachprodBenchCmd.Flags().String(clusterFlag, "", "the name of the cluster (must be set)")
-	roachprodBenchCmd.Flags().String(buildHashFlag, "", "override the hash for the build output")
+	roachprodBenchCmd.Flags().String(buildHashFlag, "", "override the build hash for the build output")
 	roachprodBenchCmd.Flags().Bool(raceFlag, false, "run tests using race builds")
 	roachprodBenchCmd.Flags().Bool(compressFlag, false, "compress the output of the benchmarks binaries")
-
+	roachprodBenchCmd.Flags().Int(batchSizeFlag, 128, "the number of packages to build per batch")
+	roachprodBenchCmd.Flags().String(crossFlag, "crosslinux", "the cross build target to use")
 	return roachprodBenchCmd
 }
 
 func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 	ctx := cmd.Context()
 	var (
-		cluster   = mustGetFlagString(cmd, clusterFlag)
-		volume    = mustGetFlagString(cmd, volumeFlag)
-		benchArgs = mustGetFlagString(cmd, benchArgsFlag)
-		race      = mustGetFlagBool(cmd, raceFlag)
-		comress   = mustGetFlagBool(cmd, compressFlag)
-		buildHash = mustGetFlagString(cmd, buildHashFlag)
+		cluster     = mustGetFlagString(cmd, clusterFlag)
+		volume      = mustGetFlagString(cmd, volumeFlag)
+		benchArgs   = mustGetFlagString(cmd, benchArgsFlag)
+		race        = mustGetFlagBool(cmd, raceFlag)
+		compress    = mustGetFlagBool(cmd, compressFlag)
+		batchSize   = mustGetFlagInt(cmd, batchSizeFlag)
+		crossConfig = mustGetFlagString(cmd, crossFlag)
+		buildHash   = mustGetFlagString(cmd, buildHashFlag)
 	)
 
 	workspace, err := d.getWorkspace(ctx)
@@ -69,12 +113,12 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 	}
 
 	if cluster == "" {
-		return fmt.Errorf("must provide --cluster (you can create one via: `roachprod create $USER-bench -n 8 --gce-machine-type=n2d-standard-8 --local-ssd=true`)")
+		return fmt.Errorf("must provide --cluster (e.g., `roachprod create $USER-bench -n 8 --gce-machine-type=n2d-standard-8 --local-ssd=true`)")
 	}
 
 	packages, testArgs := splitArgsAtDash(cmd, commandLine)
 	if len(packages) != 1 {
-		return fmt.Errorf("must provide a test (benchmark) target like ./pkg/cmd/dev or ./pkg/util/... for a wildcard match")
+		return fmt.Errorf("expected a single benchmark target specification; e.g., ./pkg/util/... or ./pkg/cmd/dev")
 	}
 
 	// Find the target we need to build.
@@ -102,19 +146,23 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 		testTargets = append(testTargets, testTarget)
 	}
 
-	// Generate a unique build hash, if none is given, from the targets and git revision.
+	if len(testTargets) == 0 {
+		return fmt.Errorf("no test targets found for package %s", pkg)
+	}
+
+	// Generate a unique build hash for the given targets and git revision.
 	if buildHash == "" {
-		stdout, err := d.exec.CommandContextSilent(ctx, "git", "rev-parse", "HEAD")
-		if err != nil {
-			return err
+		stdout, cmdErr := d.exec.CommandContextSilent(ctx, "git", "rev-parse", "HEAD")
+		if cmdErr != nil {
+			return cmdErr
 		}
 		gitRevision := strings.TrimSpace(string(stdout))
-		buildHashMD5 := md5.New()
-		buildHashMD5.Write([]byte(gitRevision))
+		buildHashSHA := sha256.New()
+		buildHashSHA.Write([]byte(gitRevision))
 		for _, target := range testTargets {
-			buildHashMD5.Write([]byte(target))
+			buildHashSHA.Write([]byte(target))
 		}
-		buildHash = hex.EncodeToString(buildHashMD5.Sum(nil)[:])[:8]
+		buildHash = hex.EncodeToString(buildHashSHA.Sum(nil)[:])[:8]
 	}
 
 	// Assume that we need LibGEOS.
@@ -122,7 +170,7 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 		return err
 	}
 
-	// Setup output destinations, and clear any old artifacts.
+	// Clear any old artifacts.
 	outputPrefix := fmt.Sprintf("roachbench/%s", buildHash)
 	binTar := fmt.Sprintf("artifacts/%s/bin.tar", outputPrefix)
 	_, _ = d.os.Remove(binTar), d.os.Remove(binTar+".gz")
@@ -142,7 +190,7 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 		if race {
 			crossArgs = append(crossArgs, "--config=race")
 		}
-		err = d.crossBuildTests(ctx, crossArgs, targets, "crosslinux", volume, outputPrefix)
+		err = d.crossBuildTests(ctx, crossArgs, targets, crossConfig, volume, outputPrefix, i+batchSize >= len(crossTargets))
 		if err != nil {
 			return err
 		}
@@ -154,18 +202,12 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 		}
 	}
 
-	if comress {
-		log.Printf("Compressing output, this might take a while...")
-		// Requires pigz (parallel gzip) to be installed on the system.
-		compressionProgram := "pigz"
-		err = d.ensureBinaryInPath(compressionProgram)
-		if err != nil {
-			log.Printf("Coud not find %s in PATH, falling back to gzip\n", compressionProgram)
-			compressionProgram = "gzip"
+	if compress {
+		if compErr := compressFile(binTar); compErr != nil {
+			return compErr
 		}
-		_, err = d.exec.CommandContextSilent(ctx, compressionProgram, binTar)
-		if err != nil {
-			return err
+		if remErr := os.Remove(binTar); remErr != nil {
+			return remErr
 		}
 	}
 
@@ -201,7 +243,7 @@ func (d *dev) roachprodBench(cmd *cobra.Command, commandLine []string) error {
 		}
 	}
 
-	roachprodBenchArgs := []string{fmt.Sprintf("./artifacts/%s", outputPrefix), "-cluster", cluster, "-libdir", libdir}
+	roachprodBenchArgs := []string{fmt.Sprintf("./artifacts/%s", outputPrefix), cluster, "-libdir", libdir}
 	roachprodBenchArgs = append(roachprodBenchArgs, strings.Fields(benchArgs)...)
 	roachprodBenchArgs = append(roachprodBenchArgs, "--")
 	roachprodBenchArgs = append(roachprodBenchArgs, testArgs...)
@@ -216,6 +258,7 @@ func (d *dev) crossBuildTests(
 	crossConfig string,
 	volume string,
 	outputPrefix string,
+	tarOutput bool,
 ) error {
 	bazelArgs = append(bazelArgs, fmt.Sprintf("--config=%s", crossConfig), "--config=ci")
 	configArgs := getConfigArgs(bazelArgs)
@@ -224,12 +267,22 @@ func (d *dev) crossBuildTests(
 		return err
 	}
 
+	stageOutputTemplate, err := createTemplate("stage", stageOutputTemplateScript)
+	if err != nil {
+		return err
+	}
+	runTemplate, err := createTemplate("run", runTemplateScript)
+	if err != nil {
+		return err
+	}
+
 	// Construct a script that builds the binaries and copies them
 	// to the appropriate location in /artifacts.
 	var script strings.Builder
+	var bazelBinSet bool
+	artifactDir := fmt.Sprintf("/artifacts/%s", outputPrefix)
 	script.WriteString("set -euxo pipefail\n")
 	script.WriteString(fmt.Sprintf("bazel %s\n", shellescape.QuoteCommand(bazelArgs)))
-	var bazelBinSet bool
 	script.WriteString("set +x\n")
 	for _, target := range targets {
 		if target.kind == "go_binary" || target.kind == "go_test" {
@@ -237,35 +290,39 @@ func (d *dev) crossBuildTests(
 				script.WriteString(fmt.Sprintf("BAZELBIN=$(bazel info bazel-bin %s)\n", shellescape.QuoteCommand(configArgs)))
 				bazelBinSet = true
 			}
+			bazelBinOutput := bazelutil.OutputOfBinaryRule(target.fullName, strings.Contains(crossConfig, "windows"))
+			templateData := packageTemplateData{
+				RunfilesDirName: fmt.Sprintf("%s.runfiles", targetToBinBasename(target.fullName)),
+				TargetBinName:   targetToBinBasename(target.fullName),
+			}
 
-			output := bazelutil.OutputOfBinaryRule(target.fullName, strings.Contains(crossConfig, "windows"))
-			outputDir := fmt.Sprintf("$BAZELBIN/%s", output[:strings.LastIndex(output, "/")])
-			tarDir := fmt.Sprintf("%s/bin/", targetToDir(target.fullName))
-			targetDir := fmt.Sprintf("/artifacts/%s", outputPrefix)
+			var runBuf strings.Builder
+			if tErr := runTemplate.Execute(&runBuf, runTemplateData{
+				packageTemplateData: templateData,
+				PackageDir:          targetToDir(target.fullName),
+			}); tErr != nil {
+				return tErr
+			}
 
-			runfilesDirName := fmt.Sprintf("%s.runfiles", targetToBinBasename(target.fullName))
+			var buildBuf strings.Builder
+			if tErr := stageOutputTemplate.Execute(&buildBuf, stageOutputTemplateData{
+				packageTemplateData: templateData,
+				BazelOutputDir:      fmt.Sprintf("$BAZELBIN/%s", bazelBinOutput[:strings.LastIndex(bazelBinOutput, "/")]),
+				RunScript:           runBuf.String(),
+				StageDir:            fmt.Sprintf("%s/%s/bin/", artifactDir, targetToDir(target.fullName)),
+				TargetName:          target.fullName,
+			}); tErr != nil {
+				return tErr
+			}
 
-			baseOutput := filepath.Base(output)
-			script.WriteString(fmt.Sprintf("mkdir -p %s\n", targetDir))
-
-			// Setup runfiles environment variables that Bazel uses for execution.
-			script.WriteString(fmt.Sprintf("echo \"export RUNFILES_DIR=\\$(pwd)/%s\" > %s/run.sh\n", runfilesDirName, outputDir))
-			script.WriteString(fmt.Sprintf("echo \"export TEST_WORKSPACE=com_github_cockroachdb_cockroach/%s\" >> %s/run.sh\n",
-				targetToDir(target.fullName), outputDir))
-
-			// Add a soft link for testdata to support tests that use relative paths rather than the Bazel runfiles util.
-			script.WriteString(fmt.Sprintf("echo \"find . -maxdepth 1 -type l -delete\" >> %s/run.sh\n", outputDir))
-			script.WriteString(fmt.Sprintf("echo \"ln -f -s ./%s/com_github_cockroachdb_cockroach/%s/* .\" >> %s/run.sh\n",
-				runfilesDirName, targetToDir(target.fullName), outputDir))
-			script.WriteString(fmt.Sprintf("echo \"./%s \"\\$@\"\" >> %s/run.sh\n", targetToBinBasename(target.fullName), outputDir))
-			script.WriteString(fmt.Sprintf("chmod +x %s/run.sh\n", outputDir))
-
-			// Tar all test binaries and runfiles.
-			script.WriteString(fmt.Sprintf("cd %s\n", outputDir))
-			script.WriteString(fmt.Sprintf("tar --transform \"s#^./#%s#\" -hrf %s/bin.tar ./*\n", tarDir, targetDir))
-
-			script.WriteString(fmt.Sprintf("echo \"Successfully built target %s at artifacts/%s\"\n", target.fullName, baseOutput))
+			script.WriteString(buildBuf.String())
 		}
+	}
+	if tarOutput {
+		script.WriteString("echo Packaging staged build output...\n")
+		script.WriteString(fmt.Sprintf("cd %s\n", artifactDir))
+		script.WriteString("tar -chf bin.tar pkg\n")
+		script.WriteString("rm -rf pkg\n")
 	}
 	_, err = d.exec.CommandContextWithInput(ctx, script.String(), "docker", dockerArgs...)
 	return err
@@ -279,13 +336,45 @@ func (d *dev) buildGeos(ctx context.Context, volume string) error {
 	return d.crossBuild(ctx, crossArgs, targets, "crosslinux", volume)
 }
 
+func createTemplate(name string, script string) (*template.Template, error) {
+	return template.New(name).
+		Funcs(template.FuncMap{"shesc": func(i interface{}) string {
+			return shellescape.Quote(fmt.Sprint(i))
+		}}).
+		Delims("#{", "#}").
+		Parse(script)
+}
+
+func targetToDir(target string) string {
+	return strings.TrimPrefix(target[:strings.LastIndex(target, ":")], "//")
+}
+
+func compressFile(filePath string) (err error) {
+	binTarFile, err := os.Open(filePath)
+	if err != nil {
+		return
+	}
+	defer func() {
+		if closeErr := binTarFile.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	compressedFile, err := os.Create(filePath + ".gz")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := compressedFile.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	_, err = io.Copy(pgzip.NewWriter(compressedFile), binTarFile)
+	return
+}
+
 func min(a, b int) int {
 	if a <= b {
 		return a
 	}
 	return b
-}
-
-func targetToDir(target string) string {
-	return strings.TrimPrefix(target[:strings.LastIndex(target, ":")], "//")
 }
