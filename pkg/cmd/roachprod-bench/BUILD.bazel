@@ -5,6 +5,7 @@ go_library(
     name = "roachprod-bench_lib",
     srcs = [
         "analysis.go",
+        "benchmark.go",
         "compare.go",
         "main.go",
         "metadata.go",
@@ -22,6 +23,7 @@ go_library(
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_cockroachdb_errors//oserror",
+        "@com_google_cloud_go_storage//:storage",
         "@org_golang_x_perf//benchstat",
         "@org_golang_x_perf//storage/benchfmt",
     ],

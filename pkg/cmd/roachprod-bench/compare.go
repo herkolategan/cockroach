@@ -13,39 +13,50 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
+	"github.com/cockroachdb/errors"
 	"strings"
+	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod-bench/google"
 	"golang.org/x/perf/benchstat"
 	"golang.org/x/perf/storage/benchfmt"
 )
 
-// TODO: compare dir can be a gs url ... need to be able to handle...
-
 func compareBenchmarks(
 	packages []string,
-	currentDir, previousDir string,
-	outputResult func(pkgGroup string, tables []*benchstat.Table) error, // TODO: just return the results... no need for function anymore
-) error {
+	currentDir, previousDir string) (map[string][]*benchstat.Table, error) {
 	packageResults := make(map[string][][]*benchfmt.Result)
+	var resultMutex sync.Mutex
+	var wg sync.WaitGroup
+	errorsFound := false
+	wg.Add(len(packages))
 	for _, pkg := range packages {
-		basePackage := pkg[:strings.Index(pkg[4:]+"/", "/")+4]
-		results, ok := packageResults[basePackage]
-		if !ok {
-			results = [][]*benchfmt.Result{make([]*benchfmt.Result, 0), make([]*benchfmt.Result, 0)}
-			packageResults[basePackage] = results
-		}
-		if err := addReportFile(&results[0], filepath.Join(previousDir, getReportLogName(reportLogName, pkg))); err != nil {
-			return err
-		}
-		if err := addReportFile(&results[1], filepath.Join(currentDir, getReportLogName(reportLogName, pkg))); err != nil {
-			return err
-		}
+		go func(pkg string) {
+			defer wg.Done()
+			basePackage := pkg[:strings.Index(pkg[4:]+"/", "/")+4]
+			resultMutex.Lock()
+			results, ok := packageResults[basePackage]
+			if !ok {
+				results = [][]*benchfmt.Result{make([]*benchfmt.Result, 0), make([]*benchfmt.Result, 0)}
+				packageResults[basePackage] = results
+			}
+			resultMutex.Unlock()
+			if err := addReportFile(&results[0], joinPath(previousDir, getReportLogName(reportLogName, pkg))); err != nil {
+				l.Errorf("failed to add report for %s: %s", pkg, err)
+				errorsFound = true
+			}
+			if err := addReportFile(&results[1], joinPath(currentDir, getReportLogName(reportLogName, pkg))); err != nil {
+				l.Errorf("failed to add report for %s: %s", pkg, err)
+				errorsFound = true
+			}
+		}(pkg)
+	}
+	wg.Wait()
+	if errorsFound {
+		return nil, errors.New("failed to process reports")
 	}
 
+	tableResults := make(map[string][]*benchstat.Table)
 	for pkgGroup, results := range packageResults {
 		var c benchstat.Collection
 		c.Alpha = 0.05
@@ -53,12 +64,9 @@ func compareBenchmarks(
 		c.AddResults("new", results[0])
 		c.AddResults("old", results[1])
 		tables := c.Tables()
-		if err := outputResult(pkgGroup, tables); err != nil {
-			return err
-		}
+		tableResults[pkgGroup] = tables
 	}
-
-	return nil
+	return tableResults, nil
 }
 
 func publishToGoogleSheets(
@@ -73,17 +81,11 @@ func publishToGoogleSheets(
 }
 
 func addReportFile(results *[]*benchfmt.Result, path string) error {
-	f, err := os.Open(path)
+	reader, err := createReader(path)
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "failed to create reader for %s", path)
 	}
-	defer func() {
-		if closeErr := f.Close(); closeErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "error closing file: %s\n", closeErr)
-		}
-	}()
-
-	br := benchfmt.NewReader(io.Reader(f))
+	br := benchfmt.NewReader(reader)
 	for br.Next() {
 		*results = append(*results, br.Result())
 	}
