@@ -41,11 +41,13 @@ func compareBenchmarks(
 				packageResults[basePackage] = results
 			}
 			resultMutex.Unlock()
-			if err := addReportFile(&results[0], joinPath(previousDir, getReportLogName(reportLogName, pkg))); err != nil {
+			if err := addReportFile(&results[0], joinPath(previousDir, getReportLogName(reportLogName, pkg))); err != nil &&
+				!isNotFoundError(err) {
 				l.Errorf("failed to add report for %s: %s", pkg, err)
 				errorsFound = true
 			}
-			if err := addReportFile(&results[1], joinPath(currentDir, getReportLogName(reportLogName, pkg))); err != nil {
+			if err := addReportFile(&results[1], joinPath(currentDir, getReportLogName(reportLogName, pkg))); err != nil &&
+				!isNotFoundError(err) {
 				l.Errorf("failed to add report for %s: %s", pkg, err)
 				errorsFound = true
 			}

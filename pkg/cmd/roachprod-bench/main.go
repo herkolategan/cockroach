@@ -39,8 +39,10 @@ var (
 	flagCompareDir   = flags.String("comparedir", "", "directory with reports to compare the results of the benchmarks against")
 	flagPublishDir   = flags.String("publishdir", "", "directory to publish the reports of the benchmarks to")
 	flagPreviousTime = flags.String("previoustime", "", "timestamp of the previous run to compare against")
+	flagExclude      = flags.String("exclude", "", "comma-separated regex of packages and benchmarks to exclude e.g. 'pkg/util/.*:BenchmarkIntPool,pkg/sql:.*'")
 	flagCopy         = flags.Bool("copy", true, "copy and extract roachbench artifacts and libraries to the target cluster")
 	flagLenient      = flags.Bool("lenient", true, "tolerate errors in the benchmark results")
+	flagIterations   = flags.Int("iterations", 1, "number of iterations to run each benchmark")
 	logOutputDir     string
 	benchDir         string
 	timestamp        time.Time
@@ -139,11 +141,11 @@ func run() error {
 	if *flagPreviousTime == "" {
 		err = executeBenchmarks(packages)
 		if err != nil {
-			if !*flagLenient {
+			if !*flagLenient || err == errNoBenchmarks {
 				return err
-			} else {
-				l.Printf("Ignoring errors in benchmark results (lenient flag was set)")
 			}
+			l.Printf("Errors found during benchmark execution: %v", err)
+			l.Printf("Ignoring errors in benchmark results (lenient flag was set)")
 		}
 	}
 

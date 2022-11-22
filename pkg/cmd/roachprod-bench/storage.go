@@ -136,3 +136,7 @@ func publishDirectory(localSrcDir string, dstDir string) error {
 	}
 	return nil
 }
+
+func isNotFoundError(err error) bool {
+	return err == storage.ErrObjectNotExist || err == os.ErrNotExist
+}

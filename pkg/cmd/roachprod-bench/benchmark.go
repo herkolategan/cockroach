@@ -23,24 +23,30 @@ import (
 	"strings"
 )
 
-// TODO: Split Parts List & Exec
+var errNoBenchmarks = errors.New("no packages containing benchmarks found")
+
 // TODO: Regex exclude list
+// TODO: add iterations
+
 // TODO: Fail Fast Fix, (set iterations on tests low to test this), Log Issue
 // TODO: Prevent runs on packages with zero and fail if no packages are found / benchmarks are found
 // Add script templates?
+// TODO: only open reports for packages that have benchmarks
 
-// TODO: add iterations
+// execute benchmarks return valid packages (containing more than zero), benchmarks list
+// google how to document a function
+
 // executeBenchmarks executes the microbenchmarks on the target cluster. Output is written to the log output directory.
 // A logger is also initialised log to output to the log output directory.
-func executeBenchmarks(packages []string) error {
-	initRoachprod()
-	buildHash := filepath.Base(benchDir)
 
-	err := createReports(packages)
+func prepareCluster(buildHash, remoteDir string) (int, error) {
+	initRoachprod()
+
+	statuses, err := roachprod.Status(context.Background(), l, *flagCluster, "")
 	if err != nil {
-		return err
+		return -1, err
 	}
-	defer closeReports()
+	numNodes := len(statuses)
 
 	// Locate binaries tarball.
 	ext := "tar"
@@ -49,46 +55,42 @@ func executeBenchmarks(packages []string) error {
 	}
 	if _, osErr := os.Stat(filepath.Join(benchDir, fmt.Sprintf("bin.%s", ext))); oserror.IsNotExist(osErr) {
 		l.Errorf("bin.%s does not exist in %s", ext, benchDir)
-		return osErr
+		return -1, osErr
 	}
 	binPath := fmt.Sprintf("%s/bin.%s", benchDir, ext)
 	remoteBinName := fmt.Sprintf("roachbench-%s.%s", buildHash, ext)
-	remoteDir := fmt.Sprintf("%s/roachbench-%s", *flagRemoteDir, buildHash)
 
+	// Clear old artifacts, copy and extract new artifacts on to the cluster.
 	if *flagCopy {
 		if fi, cmdErr := os.Stat(*flagLibDir); cmdErr == nil && fi.IsDir() {
 			if putErr := roachprod.Put(context.Background(), l, *flagCluster, *flagLibDir, "lib", true); putErr != nil {
-				return putErr
+				return numNodes, putErr
 			}
 		}
-		if err = roachprod.Put(context.Background(), l, *flagCluster, binPath, remoteBinName, true); err != nil {
-			return err
+		if rpErr := roachprod.Put(context.Background(), l, *flagCluster, binPath, remoteBinName, true); rpErr != nil {
+			return numNodes, rpErr
 		}
-
-		// Clear old build artifacts.
-		if err = roachprodRun(*flagCluster, []string{"rm", "-rf", remoteDir}); err != nil {
-			return errors.Wrap(err, "failed to remove old build artifacts")
+		if rpErr := roachprodRun(*flagCluster, []string{"rm", "-rf", remoteDir}); rpErr != nil {
+			return numNodes, errors.Wrap(rpErr, "failed to remove old build artifacts")
 		}
-
-		// Copy and extract new build artifacts.
-		if err = roachprodRun(*flagCluster, []string{"mkdir", "-p", remoteDir}); err != nil {
-			return err
+		if rpErr := roachprodRun(*flagCluster, []string{"mkdir", "-p", remoteDir}); rpErr != nil {
+			return numNodes, rpErr
 		}
 		extractFlags := "-xf"
 		if ext == "tar.gz" {
 			extractFlags = "-xzf"
 		}
-		if err = roachprodRun(*flagCluster, []string{"tar", extractFlags, remoteBinName, "-C", remoteDir}); err != nil {
-			return err
+		if rpErr := roachprodRun(*flagCluster, []string{"tar", extractFlags, remoteBinName, "-C", remoteDir}); rpErr != nil {
+			return numNodes, rpErr
 		}
 	}
+	return numNodes, nil
+}
+
+func listBenchmarks(remoteDir string, packages []string, numNodes int) ([]string, []benchmark, error) {
+	exclusionPairs := getRegexExclusionPairs()
 
 	// Generate commands for listing benchmarks.
-	statuses, err := roachprod.Status(context.Background(), l, *flagCluster, "")
-	if err != nil {
-		return err
-	}
-	numNodes := len(statuses)
 	commands := make([]cluster.RemoteCommand, 0)
 	for _, pkg := range packages {
 		command := cluster.RemoteCommand{
@@ -100,6 +102,7 @@ func executeBenchmarks(packages []string) error {
 		commands = append(commands, command)
 	}
 
+	// Execute commands for listing benchmarks.
 	l.Printf("Distributing and running benchmark listings across cluster %s\n", *flagCluster)
 	isValidBenchmarkName := regexp.MustCompile(`^Benchmark[a-zA-Z0-9_]+$`).MatchString
 	errorCount := 0
@@ -112,9 +115,18 @@ func executeBenchmarks(packages []string) error {
 			for _, benchmarkName := range strings.Split(response.Stdout, "\n") {
 				benchmarkName = strings.TrimSpace(benchmarkName)
 				if isValidBenchmarkName(benchmarkName) {
-					benchmarks = append(benchmarks, benchmark{pkg, benchmarkName})
-					counts[pkg]++
+					exclude := false
+					for _, exclusionPair := range exclusionPairs {
+						if exclusionPair[0].MatchString(pkg) && exclusionPair[1].MatchString(benchmarkName) {
+							exclude = true
+						}
+					}
+					if !exclude {
+						benchmarks = append(benchmarks, benchmark{pkg, benchmarkName})
+						counts[pkg]++
+					}
 				} else if benchmarkName != "" {
+					fmt.Println()
 					l.Printf("Ignoring invalid benchmark name: %s", benchmarkName)
 				}
 			}
@@ -127,16 +139,40 @@ func executeBenchmarks(packages []string) error {
 	})
 
 	if errorCount > 0 {
-		return errors.Newf("Failed to list benchmarks")
+		return nil, nil, errors.Newf("Failed to list benchmarks")
 	}
 
 	fmt.Println()
+	validPackages := make([]string, 0, len(counts))
 	for pkg, count := range counts {
 		l.Printf("Found %d benchmarks in %s\n", count, pkg)
+		validPackages = append(validPackages, pkg)
+	}
+	return validPackages, benchmarks, nil
+}
+
+func executeBenchmarks(packages []string) error {
+	buildHash := filepath.Base(benchDir)
+	remoteDir := fmt.Sprintf("%s/roachbench-%s", *flagRemoteDir, buildHash)
+
+	numNodes, err := prepareCluster(buildHash, remoteDir)
+	if err != nil {
+		return err
 	}
 
+	validPackages, benchmarks, err := listBenchmarks(remoteDir, packages, numNodes)
+	if len(validPackages) == 0 {
+		return errNoBenchmarks
+	}
+
+	err = createReports(validPackages)
+	if err != nil {
+		return err
+	}
+	defer closeReports()
+
 	// Generate commands for running benchmarks.
-	commands = make([]cluster.RemoteCommand, 0)
+	commands := make([]cluster.RemoteCommand, 0)
 	for _, bench := range benchmarks {
 		shellCommand := fmt.Sprintf("\"cd %s/%s/bin && ./run.sh %s -test.benchmem -test.bench=^%s$ -test.run=^$\"",
 			remoteDir, bench.pkg, strings.Join(testArgs, " "), bench.name)
@@ -144,12 +180,16 @@ func executeBenchmarks(packages []string) error {
 			Args:     []string{"sh", "-c", shellCommand},
 			Metadata: bench,
 		}
-		commands = append(commands, command)
+		for i := 0; i < *flagIterations; i++ {
+			commands = append(commands, command)
+		}
 	}
 
+	errorCount := 0
 	logIndex := 0
 	missingBenchmarks := make([]benchmark, 0)
-	l.Printf("Found %d benchmarks, distributing and running benchmarks across cluster %s\n", len(benchmarks), *flagCluster)
+	l.Printf("Found %d benchmarks, distributing and running benchmarks for %d iteration(s) across cluster %s\n",
+		len(benchmarks), *flagIterations, *flagCluster)
 	cluster.ExecuteRemoteCommands(l, *flagCluster, commands, numNodes, !*flagLenient, func(response cluster.RemoteResponse) {
 		fmt.Print(".")
 		benchmarkResults, containsErrors := extractBenchmarkResults(response.Stdout)
@@ -189,4 +229,25 @@ func executeBenchmarks(packages []string) error {
 		return errors.Newf("Found %d errors during remote execution", errorCount)
 	}
 	return nil
+}
+
+func getRegexExclusionPairs() [][]*regexp.Regexp {
+	if *flagExclude == "" {
+		return nil
+	}
+	excludeRegexes := make([][]*regexp.Regexp, 0)
+	excludeList := strings.Split(*flagExclude, ",")
+	for _, pair := range excludeList {
+		pairSplit := strings.Split(pair, ":")
+		if len(pairSplit) != 2 {
+			pkgRegex := regexp.MustCompile(".*")
+			benchRegex := regexp.MustCompile(pairSplit[0])
+			excludeRegexes = append(excludeRegexes, []*regexp.Regexp{pkgRegex, benchRegex})
+		} else {
+			pkgRegex := regexp.MustCompile(pairSplit[0])
+			benchRegex := regexp.MustCompile(pairSplit[1])
+			excludeRegexes = append(excludeRegexes, []*regexp.Regexp{pkgRegex, benchRegex})
+		}
+	}
+	return excludeRegexes
 }
