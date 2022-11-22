@@ -51,6 +51,9 @@ func compareBenchmarks(
 				l.Errorf("failed to add report for %s: %s", pkg, err)
 				errorsFound = true
 			}
+			if results[0] == nil || results[1] == nil {
+				delete(packageResults, basePackage)
+			}
 		}(pkg)
 	}
 	wg.Wait()

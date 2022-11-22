@@ -13,6 +13,7 @@ package main
 import (
 	"cloud.google.com/go/storage"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -138,5 +139,5 @@ func publishDirectory(localSrcDir string, dstDir string) error {
 }
 
 func isNotFoundError(err error) bool {
-	return err == storage.ErrObjectNotExist || err == os.ErrNotExist
+	return errors.Is(err, storage.ErrObjectNotExist) || errors.Is(err, os.ErrNotExist)
 }

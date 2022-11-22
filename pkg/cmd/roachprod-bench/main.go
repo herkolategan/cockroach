@@ -182,7 +182,7 @@ func main() {
 	ssh.InsecureIgnoreHostKey = true
 	if err := run(); err != nil {
 		if l != nil {
-			l.Errorf("Failed with error %v", err)
+			l.Errorf("Failed with error: %v", err)
 		} else {
 			_, _ = fmt.Fprintln(os.Stderr, err)
 		}
