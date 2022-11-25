@@ -94,7 +94,7 @@ func listBenchmarks(remoteDir string, packages []string, numNodes int) ([]string
 	for _, pkg := range packages {
 		command := cluster.RemoteCommand{
 			Args: []string{"sh", "-c",
-				fmt.Sprintf("\"cd %s/%s/bin && ./run.sh -test.list=Benchmark*\"",
+				fmt.Sprintf("\"cd %s/%s/bin && ./run.sh -test.list=^Benchmark*\"",
 					remoteDir, pkg)},
 			Metadata: pkg,
 		}
