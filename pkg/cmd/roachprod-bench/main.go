@@ -141,11 +141,7 @@ func run() error {
 	if *flagPreviousTime == "" {
 		err = executeBenchmarks(packages)
 		if err != nil {
-			if !*flagLenient || err == errNoBenchmarks {
-				return err
-			}
-			l.Printf("Errors found during benchmark execution: %v", err)
-			l.Printf("Ignoring errors in benchmark results (lenient flag was set)")
+			return err
 		}
 	}
 

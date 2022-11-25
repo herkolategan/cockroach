@@ -23,8 +23,6 @@ import (
 	"strings"
 )
 
-var errNoBenchmarks = errors.New("no packages containing benchmarks found")
-
 // TODO: Regex exclude list
 // TODO: add iterations
 
@@ -47,6 +45,7 @@ func prepareCluster(buildHash, remoteDir string) (int, error) {
 		return -1, err
 	}
 	numNodes := len(statuses)
+	l.Printf("Number of nodes %d", numNodes)
 
 	// Locate binaries tarball.
 	ext := "tar"
@@ -161,8 +160,11 @@ func executeBenchmarks(packages []string) error {
 	}
 
 	validPackages, benchmarks, err := listBenchmarks(remoteDir, packages, numNodes)
+	if err != nil {
+		return err
+	}
 	if len(validPackages) == 0 {
-		return errNoBenchmarks
+		return errors.New("no packages containing benchmarks found")
 	}
 
 	err = createReports(validPackages)
@@ -226,7 +228,11 @@ func executeBenchmarks(packages []string) error {
 		l.Errorf("Missing benchmarks %v", missingBenchmarks)
 	}
 	if errorCount != 0 {
-		return errors.Newf("Found %d errors during remote execution", errorCount)
+		if *flagLenient {
+			l.Printf("Ignoring errors in benchmark results (lenient flag was set)")
+		} else {
+			return errors.Newf("Found %d errors during remote execution", errorCount)
+		}
 	}
 	return nil
 }
