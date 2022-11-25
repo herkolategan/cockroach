@@ -228,6 +228,8 @@ func DefaultTestTempStorageConfigWithSize(
 // TestTenantArgs are the arguments used when creating a tenant from a
 // TestServer.
 type TestTenantArgs struct {
+	TenantName roachpb.TenantName
+
 	TenantID roachpb.TenantID
 
 	// Existing, if true, indicates an existing tenant, rather than a new tenant
@@ -242,10 +244,6 @@ type TestTenantArgs struct {
 	// Settings allows the caller to control the settings object used for the
 	// tenant cluster.
 	Settings *cluster.Settings
-
-	// AllowSettingClusterSettings, if true, allows the tenant to set in-memory
-	// cluster settings.
-	AllowSettingClusterSettings bool
 
 	// Stopper, if not nil, is used to stop the tenant manually otherwise the
 	// TestServer stopper will be used.

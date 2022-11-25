@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/startupmigrations/leasemanager"
@@ -45,16 +44,6 @@ var (
 
 // MigrationManagerTestingKnobs contains testing knobs.
 type MigrationManagerTestingKnobs struct {
-	// DisableBackfillMigrations stops applying migrations once
-	// a migration with 'doesBackfill == true' is encountered.
-	// TODO(mberhault): we could skip only backfill migrations and dependencies
-	// if we had some concept of migration dependencies.
-	DisableBackfillMigrations bool
-	AfterJobMigration         func()
-	// AlwaysRunJobMigration controls whether to always run the schema change job
-	// migration regardless of whether it has been marked as complete.
-	AlwaysRunJobMigration bool
-
 	// AfterEnsureMigrations is called after each call to EnsureMigrations.
 	AfterEnsureMigrations func()
 }
@@ -109,8 +98,7 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 	},
 	{
 		// Introduced in v2.0. Baked into v2.1.
-		name:             "create system.table_statistics table",
-		newDescriptorIDs: staticIDs(keys.TableStatisticsTableID),
+		name: "create system.table_statistics table",
 	},
 	{
 		// Introduced in v2.0. Permanent migration.
@@ -119,8 +107,7 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 	},
 	{
 		// Introduced in v2.0. Baked into v2.1.
-		name:             "create system.locations table",
-		newDescriptorIDs: staticIDs(keys.LocationsTableID),
+		name: "create system.locations table",
 	},
 	{
 		// Introduced in v2.0. Baked into v2.1.
@@ -128,8 +115,7 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 	},
 	{
 		// Introduced in v2.0. Baked into v2.1.
-		name:             "create system.role_members table",
-		newDescriptorIDs: staticIDs(keys.RoleMembersTableID),
+		name: "create system.role_members table",
 	},
 	{
 		// Introduced in v2.0. Permanent migration.
@@ -184,9 +170,8 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 	{
 		// Introduced in v2.1.
 		// TODO(knz): bake this migration into v19.1.
-		name:             "create default databases",
-		workFn:           createDefaultDbs,
-		newDescriptorIDs: databaseIDs(catalogkeys.DefaultDatabaseName, catalogkeys.PgDatabaseName),
+		name:   "create default databases",
+		workFn: createDefaultDbs,
 	},
 	{
 		// Introduced in v2.1. Baked into 20.1.
@@ -265,8 +250,7 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 	},
 	{
 		// Introduced in v20.2. Baked into v21.1.
-		name:             "create new system.scheduled_jobs table",
-		newDescriptorIDs: staticIDs(keys.ScheduledJobsTableID),
+		name: "create new system.scheduled_jobs table",
 	},
 	{
 		// Introduced in v20.2. Baked into v21.1.
@@ -281,7 +265,6 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 		// ones in those ranges. Until these deprecated version keys are all deleted
 		// we tie this migration to the last 20.2 version key.
 		includedInBootstrap: roachpb.Version{Major: 20, Minor: 2},
-		newDescriptorIDs:    staticIDs(keys.TenantsTableID),
 	},
 	{
 		// Introduced in v20.2. Baked into v21.1.
@@ -296,28 +279,6 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 		// Introduced in v20.2.
 		name: "mark non-terminal schema change jobs with a pre-20.1 format version as failed",
 	},
-}
-
-func staticIDs(
-	ids ...descpb.ID,
-) func(ctx context.Context, db DB, codec keys.SQLCodec) ([]descpb.ID, error) {
-	return func(ctx context.Context, db DB, codec keys.SQLCodec) ([]descpb.ID, error) { return ids, nil }
-}
-
-func databaseIDs(
-	names ...string,
-) func(ctx context.Context, db DB, codec keys.SQLCodec) ([]descpb.ID, error) {
-	return func(ctx context.Context, db DB, codec keys.SQLCodec) ([]descpb.ID, error) {
-		var ids []descpb.ID
-		for _, name := range names {
-			kv, err := db.Get(ctx, catalogkeys.MakeDatabaseNameKey(codec, name))
-			if err != nil {
-				return nil, err
-			}
-			ids = append(ids, descpb.ID(kv.ValueInt()))
-		}
-		return ids, nil
-	}
 }
 
 // migrationDescriptor describes a single migration hook that's used to modify
@@ -344,18 +305,11 @@ type migrationDescriptor struct {
 	// Generally when setting this field you'll want to introduce a new cluster
 	// version.
 	includedInBootstrap roachpb.Version
-	// doesBackfill should be set to true if the migration triggers a backfill.
-	doesBackfill bool
 	// clusterWide migrations are only run by the system tenant. All other
 	// migrations are run by each individual tenant. clusterWide migrations
 	// typically have to do with cluster settings, which is a cluster-wide
 	// concept.
 	clusterWide bool
-	// newDescriptorIDs is a function that returns the IDs of any additional
-	// descriptors that were added by this migration. This is needed to automate
-	// certain tests, which check the number of ranges/descriptors present on
-	// server bootup.
-	newDescriptorIDs func(ctx context.Context, db DB, codec keys.SQLCodec) ([]descpb.ID, error)
 }
 
 func init() {
@@ -592,12 +546,6 @@ func (m *Manager) EnsureMigrations(ctx context.Context, bootstrapVersion roachpb
 			continue
 		}
 
-		if m.testingKnobs.DisableBackfillMigrations && migration.doesBackfill {
-			log.Infof(ctx, "ignoring migrations after (and including) %s due to testing knob",
-				migration.name)
-			break
-		}
-
 		if log.V(1) {
 			log.Infof(ctx, "running migration %q", migration.name)
 		}
@@ -626,11 +574,6 @@ func (m *Manager) checkIfAllMigrationsAreComplete(
 	for _, migration := range backwardCompatibleMigrations {
 		if !m.shouldRunMigration(migration, bootstrapVersion) {
 			continue
-		}
-		if m.testingKnobs.DisableBackfillMigrations && migration.doesBackfill {
-			log.Infof(ctx, "ignoring migrations after (and including) %s due to testing knob",
-				migration.name)
-			break
 		}
 		key := migrationKey(m.codec, migration)
 		if _, ok := completedMigrations[string(key)]; !ok {
@@ -722,6 +665,10 @@ func initializeClusterSecret(ctx context.Context, r runner) error {
 }
 
 func populateVersionSetting(ctx context.Context, r runner) error {
+	if !r.codec.ForSystemTenant() {
+		log.Fatalf(ctx, "populateVersionSetting can only run for the system tenant")
+	}
+
 	var v roachpb.Version
 	if err := r.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		return txn.GetProto(ctx, keys.BootstrapVersionKey, &v)
@@ -752,28 +699,19 @@ func populateVersionSetting(ctx context.Context, r runner) error {
 		return err
 	}
 
-	// NB: We have to run with retry here due to the following "race" condition:
-	// - We're attempting to the set the cluster version at startup.
-	// - Setting the cluster version requires all nodes to be up and running, in
-	//   order to push out all relevant version gates.
-	// - This list of "all nodes" is gathered by looking at all the liveness
-	//   records in KV.
-	// - When starting a multi-node cluster all at once, nodes other than the
-	//   one being bootstrapped join the cluster using the join RPC.
-	// - The join RPC results in the creation of a liveness record for the
-	//   joining node, except it starts off in an expired state (leaving it to
-	//   the joining node to heartbeat it for the very first time).
-	//
-	// Attempting to set the cluster version at startup, while there also may be
-	// other nodes trying to join, could then result in failures where the
-	// migration infrastructure find expired liveness records and gives up. To
-	// that end we'll simply retry, expecting the joining nodes to "come live"
-	// before long.
-	if err := r.execAsRootWithRetry(
-		ctx, "set-setting", "SET CLUSTER SETTING version = $1", v.String(),
+	// Add the host cluster version override for all tenants. This override is
+	// used by secondary tenants to observe the host cluster version number and
+	// ensure that secondary tenants don't upgrade to a version beyond the host
+	// cluster version. As mentioned above, don't retry on conflict.
+	tenantID := tree.NewDInt(0) // Tenant ID 0 indicates that we're overriding the value for all tenants.
+	if err := r.execAsRoot(
+		ctx,
+		"insert-setting",
+		fmt.Sprintf(`INSERT INTO system.tenant_settings (tenant_id, name, value, "last_updated", "value_type") VALUES (%d, 'version', x'%x', now(), 'm') ON CONFLICT(tenant_id, name) DO NOTHING`, tenantID, b),
 	); err != nil {
 		return err
 	}
+
 	return nil
 }
 

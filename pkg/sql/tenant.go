@@ -70,32 +70,44 @@ func rejectIfSystemTenant(tenID uint64, op string) error {
 // CreateTenantRecord creates a tenant in system.tenants and installs an initial
 // span config (in system.span_configurations) for it. It also initializes the
 // usage data in system.tenant_usage if info.Usage is set.
+//
+// If the passed in `info` has the `TenantID` field unset (= 0),
+// CreateTenantRecord will assign the tenant the next available ID after
+// consulting the system.tenants table.
 func CreateTenantRecord(
 	ctx context.Context,
 	execCfg *ExecutorConfig,
 	txn *kv.Txn,
 	info *descpb.TenantInfoWithUsage,
 	initialTenantZoneConfig *zonepb.ZoneConfig,
-) error {
+) (roachpb.TenantID, error) {
 	const op = "create"
 	if err := rejectIfCantCoordinateMultiTenancy(execCfg.Codec, op); err != nil {
-		return err
+		return roachpb.TenantID{}, err
 	}
 	if err := rejectIfSystemTenant(info.ID, op); err != nil {
-		return err
+		return roachpb.TenantID{}, err
 	}
 
 	tenID := info.ID
+	if tenID == 0 {
+		tenantID, err := getAvailableTenantID(ctx, info.Name, execCfg, txn)
+		if err != nil {
+			return roachpb.TenantID{}, err
+		}
+		tenID = tenantID.ToUint64()
+		info.ID = tenID
+	}
 	active := info.State == descpb.TenantInfo_ACTIVE
 	infoBytes, err := protoutil.Marshal(&info.TenantInfo)
 	if err != nil {
-		return err
+		return roachpb.TenantID{}, err
 	}
 
 	// Insert into the tenant table and detect collisions.
 	if info.Name != "" {
 		if !execCfg.Settings.Version.IsActive(ctx, clusterversion.V23_1TenantNames) {
-			return pgerror.Newf(pgcode.FeatureNotSupported, "cannot use tenant names")
+			return roachpb.TenantID{}, pgerror.Newf(pgcode.FeatureNotSupported, "cannot use tenant names")
 		}
 	}
 	if num, err := execCfg.InternalExecutor.ExecEx(
@@ -108,9 +120,9 @@ func CreateTenantRecord(
 			if info.Name != "" {
 				extra = redact.Sprintf(" with name %q", info.Name)
 			}
-			return pgerror.Newf(pgcode.DuplicateObject, "tenant \"%d\"%s already exists", tenID, extra)
+			return roachpb.TenantID{}, pgerror.Newf(pgcode.DuplicateObject, "tenant \"%d\"%s already exists", tenID, extra)
 		}
-		return errors.Wrap(err, "inserting new tenant")
+		return roachpb.TenantID{}, errors.Wrap(err, "inserting new tenant")
 	} else if num != 1 {
 		log.Fatalf(ctx, "unexpected number of rows affected: %d", num)
 	}
@@ -118,7 +130,7 @@ func CreateTenantRecord(
 	if u := info.Usage; u != nil {
 		consumption, err := protoutil.Marshal(&u.Consumption)
 		if err != nil {
-			return errors.Wrap(err, "marshaling tenant usage data")
+			return roachpb.TenantID{}, errors.Wrap(err, "marshaling tenant usage data")
 		}
 		if num, err := execCfg.InternalExecutor.ExecEx(
 			ctx, "create-tenant-usage", txn, sessiondata.NodeUserSessionDataOverride,
@@ -128,16 +140,16 @@ func CreateTenantRecord(
 			  total_consumption)
 			VALUES (
 				$1, 0, 0, now(),
-				$2, $3, $4, 0, 
+				$2, $3, $4, 0,
 				$5)`,
 			tenID,
 			u.RUBurstLimit, u.RURefillRate, u.RUCurrent,
 			tree.NewDBytes(tree.DBytes(consumption)),
 		); err != nil {
 			if pgerror.GetPGCode(err) == pgcode.UniqueViolation {
-				return pgerror.Newf(pgcode.DuplicateObject, "tenant \"%d\" already has usage data", tenID)
+				return roachpb.TenantID{}, pgerror.Newf(pgcode.DuplicateObject, "tenant \"%d\" already has usage data", tenID)
 			}
-			return errors.Wrap(err, "inserting tenant usage data")
+			return roachpb.TenantID{}, errors.Wrap(err, "inserting tenant usage data")
 		} else if num != 1 {
 			log.Fatalf(ctx, "unexpected number of rows affected: %d", num)
 		}
@@ -170,33 +182,60 @@ func CreateTenantRecord(
 	// Make it behave like usual system database ranges, for good measure.
 	tenantSpanConfig.GCPolicy.IgnoreStrictEnforcement = true
 
-	tenantPrefix := keys.MakeTenantPrefix(roachpb.MakeTenantID(tenID))
+	tenantPrefix := keys.MakeTenantPrefix(roachpb.MustMakeTenantID(tenID))
 	record, err := spanconfig.MakeRecord(spanconfig.MakeTargetFromSpan(roachpb.Span{
 		Key:    tenantPrefix,
 		EndKey: tenantPrefix.Next(),
 	}), tenantSpanConfig)
 	if err != nil {
-		return err
+		return roachpb.TenantID{}, err
 	}
 	toUpsert := []spanconfig.Record{record}
 	scKVAccessor := execCfg.SpanConfigKVAccessor.WithTxn(ctx, txn)
-	return scKVAccessor.UpdateSpanConfigRecords(
+	return roachpb.MustMakeTenantID(tenID), scKVAccessor.UpdateSpanConfigRecords(
 		ctx, nil, toUpsert, hlc.MinTimestamp, hlc.MaxTimestamp,
 	)
 }
 
-// GetTenantRecord retrieves a tenant in system.tenants.
-func GetTenantRecord(
-	ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, tenID uint64,
+// GetTenantRecordByName retrieves a tenant with the provided name from
+// system.tenants.
+func GetTenantRecordByName(
+	ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, tenantName roachpb.TenantName,
 ) (*descpb.TenantInfo, error) {
+	if !execCfg.Settings.Version.IsActive(ctx, clusterversion.V23_1TenantNames) {
+		return nil, errors.Newf("tenant names not supported until upgrade to %s or higher is completed",
+			clusterversion.V23_1TenantNames.String())
+	}
 	row, err := execCfg.InternalExecutor.QueryRowEx(
-		ctx, "activate-tenant", txn, sessiondata.NodeUserSessionDataOverride,
-		`SELECT info FROM system.tenants WHERE id = $1`, tenID,
+		ctx, "get-tenant", txn, sessiondata.NodeUserSessionDataOverride,
+		`SELECT info FROM system.tenants WHERE name = $1`, tenantName,
 	)
 	if err != nil {
 		return nil, err
 	} else if row == nil {
-		return nil, pgerror.Newf(pgcode.UndefinedObject, "tenant \"%d\" does not exist", tenID)
+		return nil, pgerror.Newf(pgcode.UndefinedObject, "tenant %q does not exist", tenantName)
+	}
+
+	info := &descpb.TenantInfo{}
+	infoBytes := []byte(tree.MustBeDBytes(row[0]))
+	if err := protoutil.Unmarshal(infoBytes, info); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+// GetTenantRecordByID retrieves a tenant in system.tenants.
+func GetTenantRecordByID(
+	ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, tenID roachpb.TenantID,
+) (*descpb.TenantInfo, error) {
+	row, err := execCfg.InternalExecutor.QueryRowEx(
+		ctx, "get-tenant", txn, sessiondata.NodeUserSessionDataOverride,
+		`SELECT info FROM system.tenants WHERE id = $1`, tenID.ToUint64(),
+	)
+	if err != nil {
+		return nil, err
+	} else if row == nil {
+		return nil, pgerror.Newf(pgcode.UndefinedObject, "tenant \"%d\" does not exist", tenID.ToUint64())
 	}
 
 	info := &descpb.TenantInfo{}
@@ -230,19 +269,70 @@ func updateTenantRecord(
 	return nil
 }
 
+// getAvailableTenantID returns the first available ID that can be assigned to
+// the created tenant. Note, this ID could have previously belonged to another
+// tenant that has since been dropped and gc'ed.
+func getAvailableTenantID(
+	ctx context.Context, tenantName roachpb.TenantName, execCfg *ExecutorConfig, txn *kv.Txn,
+) (roachpb.TenantID, error) {
+	// Find the first available ID that can be assigned to the created tenant.
+	// Note, this ID could have previously belonged to another tenant that has
+	// since been dropped and gc'ed.
+	row, err := execCfg.InternalExecutor.QueryRowEx(ctx, "next-tenant-id", txn,
+		sessiondata.NodeUserSessionDataOverride, `
+   SELECT id+1 AS newid
+    FROM (VALUES (1) UNION ALL SELECT id FROM system.tenants) AS u(id)
+   WHERE NOT EXISTS (SELECT 1 FROM system.tenants t WHERE t.id=u.id+1)
+     AND NOT EXISTS (SELECT 1 FROM system.tenants t WHERE t.name=$1)
+   ORDER BY id LIMIT 1
+`, tenantName)
+	if err != nil {
+		return roachpb.TenantID{}, err
+	}
+	if row == nil {
+		return roachpb.TenantID{}, errors.Newf("tenant with name %q already exists", tenantName)
+	}
+	nextID := *row[0].(*tree.DInt)
+	return roachpb.MustMakeTenantID(uint64(nextID)), nil
+}
+
 // CreateTenant implements the tree.TenantOperator interface.
-func (p *planner) CreateTenant(ctx context.Context, tenID uint64, name string) error {
+func (p *planner) CreateTenant(
+	ctx context.Context, name roachpb.TenantName,
+) (roachpb.TenantID, error) {
+	const op = "create tenant"
+	if err := p.RequireAdminRole(ctx, op); err != nil {
+		return roachpb.TenantID{}, err
+	}
+	if err := rejectIfCantCoordinateMultiTenancy(p.execCfg.Codec, op); err != nil {
+		return roachpb.TenantID{}, err
+	}
+
+	nextID, err := getAvailableTenantID(ctx, name, p.ExecCfg(), p.Txn())
+	if err != nil {
+		return roachpb.TenantID{}, err
+	}
+	if err := p.CreateTenantWithID(ctx, nextID.ToUint64(), name); err != nil {
+		return roachpb.TenantID{}, err
+	}
+	return nextID, nil
+}
+
+// CreateTenantWithID implements the tree.TenantOperator interface.
+func (p *planner) CreateTenantWithID(
+	ctx context.Context, tenantID uint64, tenantName roachpb.TenantName,
+) error {
 	if err := p.RequireAdminRole(ctx, "create tenant"); err != nil {
 		return err
 	}
 
 	info := &descpb.TenantInfoWithUsage{
 		TenantInfo: descpb.TenantInfo{
-			ID: tenID,
+			ID: tenantID,
 			// We synchronously initialize the tenant's keyspace below, so
 			// we can skip the ADD state and go straight to an ACTIVE state.
 			State: descpb.TenantInfo_ACTIVE,
-			Name:  name,
+			Name:  tenantName,
 		},
 	}
 
@@ -251,12 +341,12 @@ func (p *planner) CreateTenant(ctx context.Context, tenID uint64, name string) e
 		return err
 	}
 
-	if err := CreateTenantRecord(ctx, p.ExecCfg(), p.Txn(), info, initialTenantZoneConfig); err != nil {
+	if _, err := CreateTenantRecord(ctx, p.ExecCfg(), p.Txn(), info, initialTenantZoneConfig); err != nil {
 		return err
 	}
 
 	// Initialize the tenant's keyspace.
-	codec := keys.MakeSQLCodec(roachpb.MakeTenantID(tenID))
+	codec := keys.MakeSQLCodec(roachpb.MustMakeTenantID(tenantID))
 	schema := bootstrap.MakeMetadataSchema(
 		codec,
 		initialTenantZoneConfig, /* defaultZoneConfig */
@@ -372,7 +462,7 @@ func ActivateTenant(ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, t
 	}
 
 	// Retrieve the tenant's info.
-	info, err := GetTenantRecord(ctx, execCfg, txn, tenID)
+	info, err := GetTenantRecordByID(ctx, execCfg, txn, roachpb.MustMakeTenantID(tenID))
 	if err != nil {
 		return errors.Wrap(err, "activating tenant")
 	}
@@ -395,7 +485,7 @@ func clearTenant(ctx context.Context, execCfg *ExecutorConfig, info *descpb.Tena
 
 	log.Infof(ctx, "clearing data for tenant %d", info.ID)
 
-	prefix := keys.MakeTenantPrefix(roachpb.MakeTenantID(info.ID))
+	prefix := keys.MakeTenantPrefix(roachpb.MustMakeTenantID(info.ID))
 	prefixEnd := prefix.PrefixEnd()
 
 	log.VEventf(ctx, 2, "ClearRange %s - %s", prefix, prefixEnd)
@@ -410,22 +500,55 @@ func clearTenant(ctx context.Context, execCfg *ExecutorConfig, info *descpb.Tena
 }
 
 // DestroyTenant implements the tree.TenantOperator interface.
-func (p *planner) DestroyTenant(ctx context.Context, tenID uint64, synchronous bool) error {
+func (p *planner) DestroyTenant(
+	ctx context.Context, tenantName roachpb.TenantName, synchronous bool,
+) error {
+	if err := p.validateDestroyTenant(ctx); err != nil {
+		return err
+	}
+
+	info, err := GetTenantRecordByName(ctx, p.execCfg, p.txn, tenantName)
+	if err != nil {
+		return errors.Wrap(err, "destroying tenant")
+	}
+
+	return destroyTenantInternal(ctx, p.txn, p.execCfg, &p.extendedEvalCtx, p.User(), info, synchronous)
+}
+
+// DestroyTenantByID implements the tree.TenantOperator interface.
+func (p *planner) DestroyTenantByID(ctx context.Context, tenID uint64, synchronous bool) error {
+	if err := p.validateDestroyTenant(ctx); err != nil {
+		return err
+	}
+
+	info, err := GetTenantRecordByID(ctx, p.execCfg, p.txn, roachpb.MustMakeTenantID(tenID))
+	if err != nil {
+		return errors.Wrap(err, "destroying tenant")
+	}
+	return destroyTenantInternal(ctx, p.txn, p.execCfg, &p.extendedEvalCtx, p.User(), info, synchronous)
+}
+
+func (p *planner) validateDestroyTenant(ctx context.Context) error {
 	const op = "destroy"
 	if err := p.RequireAdminRole(ctx, "destroy tenant"); err != nil {
 		return err
 	}
-	if err := rejectIfCantCoordinateMultiTenancy(p.execCfg.Codec, op); err != nil {
-		return err
-	}
+	return rejectIfCantCoordinateMultiTenancy(p.execCfg.Codec, op)
+}
+
+func destroyTenantInternal(
+	ctx context.Context,
+	txn *kv.Txn,
+	execCfg *ExecutorConfig,
+	extendedEvalCtx *extendedEvalContext,
+	user username.SQLUsername,
+	info *descpb.TenantInfo,
+	synchronous bool,
+) error {
+	const op = "destroy"
+	tenID := info.ID
 	if err := rejectIfSystemTenant(tenID, op); err != nil {
 		return err
-	}
-
-	// Retrieve the tenant's info.
-	info, err := GetTenantRecord(ctx, p.execCfg, p.txn, tenID)
-	if err != nil {
-		return errors.Wrap(err, "destroying tenant")
 	}
 
 	if info.State == descpb.TenantInfo_DROP {
@@ -433,17 +556,25 @@ func (p *planner) DestroyTenant(ctx context.Context, tenID uint64, synchronous b
 	}
 
 	// Mark the tenant as dropping.
+	//
+	// TODO(ssd): Once available, we should cancel any running
+	// replication job on this tenant record.
+	//
+	// TODO(ssd): We may want to implement a job that waits out
+	// any running sql pods before enqueing the GC job.
 	info.State = descpb.TenantInfo_DROP
-	if err := updateTenantRecord(ctx, p.execCfg, p.txn, info); err != nil {
+	info.DroppedName = info.Name
+	info.Name = ""
+	if err := updateTenantRecord(ctx, execCfg, txn, info); err != nil {
 		return errors.Wrap(err, "destroying tenant")
 	}
 
-	jobID, err := gcTenantJob(ctx, p.execCfg, p.txn, p.User(), tenID, synchronous)
+	jobID, err := gcTenantJob(ctx, execCfg, txn, user, tenID, synchronous)
 	if err != nil {
 		return errors.Wrap(err, "scheduling gc job")
 	}
 	if synchronous {
-		p.extendedEvalCtx.Jobs.add(jobID)
+		extendedEvalCtx.Jobs.add(jobID)
 	}
 	return nil
 }
@@ -490,7 +621,7 @@ func GCTenantSync(ctx context.Context, execCfg *ExecutorConfig, info *descpb.Ten
 		}
 
 		// Clear out all span config records left over by the tenant.
-		tenID := roachpb.MakeTenantID(info.ID)
+		tenID := roachpb.MustMakeTenantID(info.ID)
 		tenantPrefix := keys.MakeTenantPrefix(tenID)
 		tenantSpan := roachpb.Span{
 			Key:    tenantPrefix,
@@ -575,7 +706,7 @@ func (p *planner) GCTenant(ctx context.Context, tenID uint64) error {
 	var info *descpb.TenantInfo
 	if txnErr := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		var err error
-		info, err = GetTenantRecord(ctx, p.execCfg, p.txn, tenID)
+		info, err = GetTenantRecordByID(ctx, p.execCfg, p.txn, roachpb.MustMakeTenantID(tenID))
 		return err
 	}); txnErr != nil {
 		return errors.Wrapf(txnErr, "retrieving tenant %d", tenID)
@@ -617,7 +748,7 @@ func (p *planner) UpdateTenantResourceLimits(
 		ctx context.Context, txn *kv.Txn, ie sqlutil.InternalExecutor,
 	) error {
 		return p.ExecCfg().TenantUsageServer.ReconfigureTokenBucket(
-			ctx, p.Txn(), ie, roachpb.MakeTenantID(tenantID), availableRU, refillRate,
+			ctx, p.Txn(), ie, roachpb.MustMakeTenantID(tenantID), availableRU, refillRate,
 			maxBurstRU, asOf, asOfConsumedRequestUnits,
 		)
 	})
@@ -632,7 +763,9 @@ func TestingUpdateTenantRecord(
 }
 
 // RenameTenant implements the tree.TenantOperator interface.
-func (p *planner) RenameTenant(ctx context.Context, tenID uint64, name string) error {
+func (p *planner) RenameTenant(
+	ctx context.Context, tenantID uint64, tenantName roachpb.TenantName,
+) error {
 	if err := p.RequireAdminRole(ctx, "rename tenant"); err != nil {
 		return err
 	}
@@ -641,7 +774,7 @@ func (p *planner) RenameTenant(ctx context.Context, tenID uint64, name string) e
 		return pgerror.Newf(pgcode.FeatureNotSupported, "cannot use tenant names")
 	}
 
-	if err := rejectIfSystemTenant(tenID, "rename"); err != nil {
+	if err := rejectIfSystemTenant(tenantID, "rename"); err != nil {
 		return err
 	}
 
@@ -652,14 +785,25 @@ SET info =
 crdb_internal.json_to_pb('cockroach.sql.sqlbase.TenantInfo',
   crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info) ||
   json_build_object('name', $2))
-WHERE id = $1`, tenID, name); err != nil {
+WHERE id = $1`, tenantID, tenantName); err != nil {
 		if pgerror.GetPGCode(err) == pgcode.UniqueViolation {
-			return pgerror.Newf(pgcode.DuplicateObject, "name %q is already taken", name)
+			return pgerror.Newf(pgcode.DuplicateObject, "name %q is already taken", tenantName)
 		}
 		return errors.Wrap(err, "renaming tenant")
 	} else if num != 1 {
-		return pgerror.Newf(pgcode.UndefinedObject, "tenant %d not found", tenID)
+		return pgerror.Newf(pgcode.UndefinedObject, "tenant %d not found", tenantID)
 	}
 
 	return nil
+}
+
+// GetTenantInfo implements the tree.TenantOperator interface.
+func (p *planner) GetTenantInfo(
+	ctx context.Context, tenantName roachpb.TenantName,
+) (*descpb.TenantInfo, error) {
+	if err := p.RequireAdminRole(ctx, "get tenant"); err != nil {
+		return nil, err
+	}
+
+	return GetTenantRecordByName(ctx, p.execCfg, p.Txn(), tenantName)
 }

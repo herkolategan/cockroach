@@ -38,9 +38,9 @@ import {
   defaultFilters,
   util,
   StatementsPageRoot,
-  ActiveStatementsViewStateProps,
+  RecentStatementsViewStateProps,
   StatementsPageStateProps,
-  ActiveStatementsViewDispatchProps,
+  RecentStatementsViewDispatchProps,
   StatementsPageDispatchProps,
   StatementsPageRootProps,
 } from "@cockroachlabs/cluster-ui";
@@ -59,16 +59,15 @@ import { resetSQLStatsAction } from "src/redux/sqlStats";
 import { LocalSetting } from "src/redux/localsettings";
 import { nodeRegionsByIDSelector } from "src/redux/nodes";
 import {
-  activeStatementsViewActions,
-  mapStateToActiveStatementViewProps,
-} from "./activeStatementsSelectors";
+  recentStatementsViewActions,
+  mapStateToRecentStatementViewProps,
+} from "./recentStatementsSelectors";
 import { selectTimeScale } from "src/redux/timeScale";
 import { selectStatementsLastUpdated } from "src/selectors/executionFingerprintsSelectors";
+import { api as clusterUiApi } from "@cockroachlabs/cluster-ui";
 
 type ICollectedStatementStatistics =
   protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
-type IStatementDiagnosticsReport =
-  protos.cockroach.server.serverpb.IStatementDiagnosticsReport;
 
 const {
   aggregateStatementStats,
@@ -143,8 +142,9 @@ export const selectStatements = createSelector(
       if (!(key in statsByStatementKey)) {
         statsByStatementKey[key] = {
           statementFingerprintID: stmt.statement_fingerprint_id?.toString(),
-          statementFingerprintHexID:
+          statementFingerprintHexID: util.FixFingerprintHexValue(
             stmt.statement_fingerprint_id?.toString(16),
+          ),
           statement: stmt.statement,
           statementSummary: stmt.statement_summary,
           aggregatedTs: stmt.aggregated_ts,
@@ -163,7 +163,9 @@ export const selectStatements = createSelector(
       const stmt = statsByStatementKey[key];
       return {
         aggregatedFingerprintID: stmt.statementFingerprintID,
-        aggregatedFingerprintHexID: stmt.statementFingerprintHexID,
+        aggregatedFingerprintHexID: util.FixFingerprintHexValue(
+          stmt.statementFingerprintHexID,
+        ),
         label: stmt.statement,
         summary: stmt.statementSummary,
         aggregatedTs: stmt.aggregatedTs,
@@ -301,7 +303,14 @@ const fingerprintsPageActions = {
       );
     };
   },
-  onActivateStatementDiagnostics: createStatementDiagnosticsReportAction,
+  onActivateStatementDiagnostics: (
+    insertStmtDiagnosticRequest: clusterUiApi.InsertStmtDiagnosticRequest,
+  ) => {
+    return (dispatch: AppDispatch) =>
+      dispatch(
+        createStatementDiagnosticsReportAction(insertStmtDiagnosticRequest),
+      );
+  },
   onDiagnosticsModalOpen: createOpenDiagnosticsModalAction,
   onSearchComplete: (query: string) => searchLocalSetting.set(query),
   onPageChanged: trackStatementsPaginationAction,
@@ -316,13 +325,15 @@ const fingerprintsPageActions = {
     }),
   onFilterChange: (filters: Filters) => filtersLocalSetting.set(filters),
   onSelectDiagnosticsReportDropdownOption: (
-    report: IStatementDiagnosticsReport,
+    report: clusterUiApi.StatementDiagnosticsReport,
   ) => {
     if (report.completed) {
       return trackDownloadDiagnosticsBundleAction(report.statement_fingerprint);
     } else {
       return (dispatch: AppDispatch) => {
-        dispatch(cancelStatementDiagnosticsReportAction(report.id));
+        dispatch(
+          cancelStatementDiagnosticsReportAction({ requestId: report.id }),
+        );
         dispatch(
           trackCancelDiagnosticsBundleAction(report.statement_fingerprint),
         );
@@ -341,12 +352,12 @@ const fingerprintsPageActions = {
 
 type StateProps = {
   fingerprintsPageProps: StatementsPageStateProps;
-  activePageProps: ActiveStatementsViewStateProps;
+  activePageProps: RecentStatementsViewStateProps;
 };
 
 type DispatchProps = {
   fingerprintsPageProps: StatementsPageDispatchProps;
-  activePageProps: ActiveStatementsViewDispatchProps;
+  activePageProps: RecentStatementsViewDispatchProps;
 };
 
 export default withRouter(
@@ -374,7 +385,7 @@ export default withRouter(
         totalFingerprints: selectTotalFingerprints(state),
         hasViewActivityRedactedRole: selectHasViewActivityRedactedRole(state),
       },
-      activePageProps: mapStateToActiveStatementViewProps(state),
+      activePageProps: mapStateToRecentStatementViewProps(state),
     }),
     dispatch => ({
       fingerprintsPageProps: bindActionCreators(
@@ -382,7 +393,7 @@ export default withRouter(
         dispatch,
       ),
       activePageProps: bindActionCreators(
-        activeStatementsViewActions,
+        recentStatementsViewActions,
         dispatch,
       ),
     }),

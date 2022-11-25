@@ -138,6 +138,8 @@ func TestContextualHelp(t *testing.T) {
 
 		{`CREATE EXTERNAL CONNECTION ??`, `CREATE EXTERNAL CONNECTION`},
 
+		{`CREATE TENANT ??`, `CREATE TENANT`},
+
 		{`CREATE USER blih ??`, `CREATE ROLE`},
 		{`CREATE USER blih WITH ??`, `CREATE ROLE`},
 
@@ -210,6 +212,10 @@ func TestContextualHelp(t *testing.T) {
 		{`DROP SCHEDULES ???`, `DROP SCHEDULES`},
 
 		{`DROP SCHEMA ??`, `DROP SCHEMA`},
+
+		{`DROP TENANT ??`, `DROP TENANT`},
+		{`DROP TENANT IF ??`, `DROP TENANT`},
+		{`DROP TENANT IF EXISTS ??`, `DROP TENANT`},
 
 		{`EXPLAIN (??`, `EXPLAIN`},
 		{`EXPLAIN SELECT 1 ??`, `SELECT`},
@@ -401,6 +407,8 @@ func TestContextualHelp(t *testing.T) {
 
 		{`SHOW TABLES FROM ??`, `SHOW TABLES`},
 		{`SHOW TABLES FROM blah ??`, `SHOW TABLES`},
+
+		{`SHOW TENANT ??`, `SHOW TENANT`},
 
 		{`SHOW TRANSACTION PRIORITY ??`, `SHOW TRANSACTION`},
 		{`SHOW TRANSACTION STATUS ??`, `SHOW TRANSACTION`},

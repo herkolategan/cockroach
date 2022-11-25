@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
@@ -190,6 +191,9 @@ type ServerConfig struct {
 	// external services (such as external storage)
 	ExternalIORecorder multitenant.TenantSideExternalIORecorder
 
+	// TenantCostController is used to measure and record RU consumption.
+	TenantCostController multitenant.TenantSideCostController
+
 	// RangeStatsFetcher is used to fetch range stats for keys.
 	RangeStatsFetcher eval.RangeStatsFetcher
 }
@@ -292,6 +296,10 @@ type TestingKnobs struct {
 	// ProcessorNoTracingSpan is used to disable the creation of a tracing span
 	// in ProcessorBase.StartInternal if the tracing is enabled.
 	ProcessorNoTracingSpan bool
+
+	// SetupFlowCb, when non-nil, is called by the execinfrapb.DistSQLServer
+	// when responding to SetupFlow RPCs.
+	SetupFlowCb func(base.SQLInstanceID, *execinfrapb.SetupFlowRequest) error
 }
 
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.

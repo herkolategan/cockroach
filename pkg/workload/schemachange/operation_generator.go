@@ -275,9 +275,9 @@ var opWeights = []int{
 	renameView:              1,
 	setColumnDefault:        1,
 	setColumnNotNull:        1,
-	setColumnType:           0,  // Disabled and tracked with #66662.
-	survive:                 0,  // Disabled and tracked with #83831
-	insertRow:               10, // Temporarily reduced because of #80820
+	setColumnType:           0, // Disabled and tracked with #66662.
+	survive:                 0, // Disabled and tracked with #83831
+	insertRow:               0, // Disabled and tracked with #91863
 	selectStmt:              10,
 	validate:                2, // validate twice more often
 }
@@ -3537,6 +3537,16 @@ func (og *operationGenerator) selectStmt(ctx context.Context, tx pgx.Tx) (stmt *
 			}
 		}
 		if err := rows.Err(); err != nil {
+			pgErr := new(pgconn.PgError)
+			// For select statements, we can have out of memory or temporary
+			// space errors at runtime when fetching the result set. So,
+			// deal with the min here.
+			if errors.As(err, &pgErr) &&
+				stmt.potentialExecErrors.contains(pgcode.MakeCode(pgErr.Code)) {
+				return errors.Mark(errors.Wrap(err, "ROLLBACK; Successfully got expected execution error."),
+					errRunInTxnRbkSentinel,
+				)
+			}
 			return err
 		}
 		return nil

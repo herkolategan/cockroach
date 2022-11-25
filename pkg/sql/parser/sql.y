@@ -1113,6 +1113,7 @@ func (u *sqlSymUnion) functionObjs() tree.FuncObjs {
 %type <tree.Statement> create_schema_stmt
 %type <tree.Statement> create_table_stmt
 %type <tree.Statement> create_table_as_stmt
+%type <tree.Statement> create_tenant_stmt
 %type <tree.Statement> create_view_stmt
 %type <tree.Statement> create_sequence_stmt
 %type <tree.Statement> create_func_stmt
@@ -1138,6 +1139,7 @@ func (u *sqlSymUnion) functionObjs() tree.FuncObjs {
 %type <tree.Statement> drop_view_stmt
 %type <tree.Statement> drop_sequence_stmt
 %type <tree.Statement> drop_func_stmt
+%type <tree.Statement> drop_tenant_stmt
 
 %type <tree.Statement> analyze_stmt
 %type <tree.Statement> explain_stmt
@@ -1214,6 +1216,7 @@ func (u *sqlSymUnion) functionObjs() tree.FuncObjs {
 %type <tree.Statement> show_syntax_stmt
 %type <tree.Statement> show_last_query_stats_stmt
 %type <tree.Statement> show_tables_stmt
+%type <tree.Statement> show_tenant_stmt
 %type <tree.Statement> show_trace_stmt
 %type <tree.Statement> show_transaction_stmt
 %type <tree.Statement> show_transactions_stmt
@@ -4140,7 +4143,7 @@ comment_text:
 // %Text:
 // CREATE DATABASE, CREATE TABLE, CREATE INDEX, CREATE TABLE AS,
 // CREATE USER, CREATE VIEW, CREATE SEQUENCE, CREATE STATISTICS,
-// CREATE ROLE, CREATE TYPE, CREATE EXTENSION
+// CREATE ROLE, CREATE TYPE, CREATE EXTENSION, CREATE TENANT
 create_stmt:
   create_role_stmt     // EXTEND WITH HELP: CREATE ROLE
 | create_ddl_stmt      // help texts in sub-rule
@@ -4149,8 +4152,27 @@ create_stmt:
 | create_changefeed_stmt
 | create_extension_stmt  // EXTEND WITH HELP: CREATE EXTENSION
 | create_external_connection_stmt // EXTEND WITH HELP: CREATE EXTERNAL CONNECTION
+| create_tenant_stmt // EXTEND WITH HELP: CREATE TENANT
 | create_unsupported   {}
 | CREATE error         // SHOW HELP: CREATE
+
+// %Help: CREATE TENANT - create new tenant
+// %Category: Group
+// %Text: CREATE TENANT name
+create_tenant_stmt:
+  CREATE TENANT name
+  {
+    $$.val = &tree.CreateTenant{Name: tree.Name($3)}
+  }
+| CREATE TENANT name FROM REPLICATION OF name ON string_or_placeholder
+  {
+    $$.val = &tree.CreateTenantFromReplication{
+      Name: tree.Name($3),
+      ReplicationSourceTenantName: tree.Name($7),
+      ReplicationSourceAddress: $9.expr(),
+    }
+  }
+| CREATE TENANT error // SHOW HELP: CREATE TENANT
 
 // %Help: CREATE EXTENSION - pseudo-statement for PostgreSQL compatibility
 // %Category: Cfg
@@ -4897,6 +4919,7 @@ drop_stmt:
 | drop_role_stmt     // EXTEND WITH HELP: DROP ROLE
 | drop_schedule_stmt // EXTEND WITH HELP: DROP SCHEDULES
 | drop_external_connection_stmt // EXTEND WITH HELP: DROP EXTERNAL CONNECTION
+| drop_tenant_stmt              // EXTEND WITH HELP: DROP TENANT
 | drop_unsupported   {}
 | DROP error         // SHOW HELP: DROP
 
@@ -5042,6 +5065,26 @@ drop_type_stmt:
     }
   }
 | DROP TYPE error // SHOW HELP: DROP TYPE
+
+// %Help: DROP TENANT - remove a tenant
+// %Category: DDL
+// %Text: DROP TENANT [IF EXISTS] <name>
+drop_tenant_stmt:
+  DROP TENANT name
+  {
+    $$.val = &tree.DropTenant{
+      Name: tree.Name($3),
+      IfExists: false,
+    }
+  }
+| DROP TENANT IF EXISTS name
+  {
+    $$.val = &tree.DropTenant{
+      Name: tree.Name($5),
+      IfExists: true,
+    }
+  }
+| DROP TENANT error // SHOW HELP: DROP TENANT
 
 target_types:
   type_name_list
@@ -5380,6 +5423,16 @@ backup_kms:
       OldKMSURI:	$7.stringOrPlaceholderOptList(),
     }
 	}
+
+// %Help: SHOW TENANT - display tenant information
+// %Category: Misc
+// %Text: SHOW TENANT
+show_tenant_stmt:
+  SHOW TENANT name
+  {
+   $$.val = &tree.ShowTenant{Name: tree.Name($3)}
+  }
+| SHOW TENANT error // SHOW HELP: SHOW TENANT
 
 // %Help: PREPARE - prepare a statement for later execution
 // %Category: Misc
@@ -6253,7 +6306,7 @@ zone_value:
 // SHOW STATISTICS, SHOW SYNTAX, SHOW TABLES, SHOW TRACE, SHOW TRANSACTION,
 // SHOW TRANSACTIONS, SHOW TRANSFER, SHOW TYPES, SHOW USERS, SHOW LAST QUERY STATISTICS,
 // SHOW SCHEDULES, SHOW LOCALITY, SHOW ZONE CONFIGURATION, SHOW FULL TABLE SCANS,
-// SHOW CREATE EXTERNAL CONNECTIONS
+// SHOW CREATE EXTERNAL CONNECTIONS, SHOW TENANT
 show_stmt:
   show_backup_stmt           // EXTEND WITH HELP: SHOW BACKUP
 | show_columns_stmt          // EXTEND WITH HELP: SHOW COLUMNS
@@ -6288,6 +6341,7 @@ show_stmt:
 | show_stats_stmt            // EXTEND WITH HELP: SHOW STATISTICS
 | show_syntax_stmt           // EXTEND WITH HELP: SHOW SYNTAX
 | show_tables_stmt           // EXTEND WITH HELP: SHOW TABLES
+| show_tenant_stmt           // EXTEND WITH HELP: SHOW TENANT
 | show_trace_stmt            // EXTEND WITH HELP: SHOW TRACE
 | show_transaction_stmt      // EXTEND WITH HELP: SHOW TRANSACTION
 | show_transactions_stmt     // EXTEND WITH HELP: SHOW TRANSACTIONS

@@ -12,7 +12,6 @@ package kvserver
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -27,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/gc"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/logstore"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
@@ -40,7 +40,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -82,35 +81,6 @@ const (
 
 var testingDisableQuiescence = envutil.EnvOrDefaultBool("COCKROACH_DISABLE_QUIESCENCE", false)
 
-var disableSyncRaftLog = settings.RegisterBoolSetting(
-	settings.TenantWritable,
-	"kv.raft_log.disable_synchronization_unsafe",
-	"set to true to disable synchronization on Raft log writes to persistent storage. "+
-		"Setting to true risks data loss or data corruption on server crashes. "+
-		"The setting is meant for internal testing only and SHOULD NOT be used in production.",
-	false,
-)
-
-const (
-	// MaxCommandSizeFloor is the minimum allowed value for the
-	// kv.raft.command.max_size cluster setting.
-	MaxCommandSizeFloor = 4 << 20 // 4MB
-)
-
-// MaxCommandSize wraps "kv.raft.command.max_size".
-var MaxCommandSize = settings.RegisterByteSizeSetting(
-	settings.TenantWritable,
-	"kv.raft.command.max_size",
-	"maximum size of a raft command",
-	kvserverbase.MaxCommandSizeDefault,
-	func(size int64) error {
-		if size < MaxCommandSizeFloor {
-			return fmt.Errorf("max_size must be greater than %s", humanizeutil.IBytes(MaxCommandSizeFloor))
-		}
-		return nil
-	},
-)
-
 // StrictGCEnforcement controls whether requests are rejected based on the GC
 // threshold and the current GC TTL (true) or just based on the GC threshold
 // (false).
@@ -119,15 +89,6 @@ var StrictGCEnforcement = settings.RegisterBoolSetting(
 	"kv.gc_ttl.strict_enforcement.enabled",
 	"if true, fail to serve requests at timestamps below the TTL even if the data still exists",
 	true,
-)
-
-type proposalReevaluationReason int
-
-const (
-	proposalNoReevaluation proposalReevaluationReason = iota
-	// proposalIllegalLeaseIndex indicates the proposal failed to apply at
-	// a Lease index it was not legal for. The command should be re-evaluated.
-	proposalIllegalLeaseIndex
 )
 
 type atomicDescString struct {
@@ -281,7 +242,7 @@ type Replica struct {
 		// depending on which lock is being held.
 		stateLoader stateloader.StateLoader
 		// on-disk storage for sideloaded SSTables. nil when there's no ReplicaID.
-		sideloaded SideloadStorage
+		sideloaded logstore.SideloadStorage
 		// stateMachine is used to apply committed raft entries.
 		stateMachine replicaStateMachine
 		// decoder is used to decode committed raft entries.

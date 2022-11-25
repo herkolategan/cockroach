@@ -549,19 +549,34 @@ type ChangefeedState interface {
 // builtin functions to create, configure, and destroy tenants. The methods will
 // return errors when run by any tenant other than the system tenant.
 type TenantOperator interface {
-	// CreateTenant attempts to install a new tenant in the system. It returns
-	// an error if the tenant already exists. The new tenant is created at the
-	// current active version of the cluster performing the create.
-	CreateTenant(ctx context.Context, tenantID uint64, tenantName string) error
+	// CreateTenantWithID attempts to install a new tenant in the system, with the
+	// provided tenantID. It returns an error if the tenant already exists. The
+	// new tenant is created at the current active version of the cluster
+	// performing the create.
+	CreateTenantWithID(ctx context.Context, tenantID uint64, tenantName roachpb.TenantName) error
+
+	// CreateTenant attempts to install a new tenant in the system and returns the
+	// ID that is assigned to the tenant. It returns an error if another tenant
+	// with `tenantName` already exists. The new tenant is created at the current
+	// active version of the cluster performing the create.
+	CreateTenant(ctx context.Context, tenantName roachpb.TenantName) (roachpb.TenantID, error)
 
 	// RenameTenant renames the specified tenant. An error is returned if
 	// the tenant does not exist or the name is already taken.
-	RenameTenant(ctx context.Context, tenantID uint64, tenantName string) error
+	RenameTenant(ctx context.Context, tenantID uint64, tenantName roachpb.TenantName) error
+
+	// DestroyTenantByID attempts to uninstall an existing tenant from the system.
+	// It returns an error if the tenant does not exist. If synchronous is true
+	// the gc job will not wait for a GC ttl.
+	DestroyTenantByID(ctx context.Context, tenantID uint64, synchronous bool) error
 
 	// DestroyTenant attempts to uninstall an existing tenant from the system.
 	// It returns an error if the tenant does not exist. If synchronous is true
 	// the gc job will not wait for a GC ttl.
-	DestroyTenant(ctx context.Context, tenantID uint64, synchronous bool) error
+	DestroyTenant(ctx context.Context, tenantName roachpb.TenantName, synchronous bool) error
+
+	// GetTenantInfo returns information about the specified tenant.
+	GetTenantInfo(ctx context.Context, tenantName roachpb.TenantName) (*descpb.TenantInfo, error)
 
 	// GCTenant attempts to garbage collect a DROP tenant from the system. Upon
 	// success it also removes the tenant record.

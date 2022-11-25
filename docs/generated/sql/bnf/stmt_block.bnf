@@ -191,6 +191,7 @@ create_stmt ::=
 	| create_changefeed_stmt
 	| create_extension_stmt
 	| create_external_connection_stmt
+	| create_tenant_stmt
 
 delete_stmt ::=
 	opt_with_clause 'DELETE' 'FROM' table_expr_opt_alias_idx opt_using_clause opt_where_clause opt_sort_clause opt_limit_clause returning_clause
@@ -200,6 +201,7 @@ drop_stmt ::=
 	| drop_role_stmt
 	| drop_schedule_stmt
 	| drop_external_connection_stmt
+	| drop_tenant_stmt
 
 explain_stmt ::=
 	'EXPLAIN' explainable_stmt
@@ -290,6 +292,7 @@ show_stmt ::=
 	| show_sessions_stmt
 	| show_stats_stmt
 	| show_tables_stmt
+	| show_tenant_stmt
 	| show_trace_stmt
 	| show_transactions_stmt
 	| show_transfer_stmt
@@ -588,6 +591,10 @@ create_extension_stmt ::=
 create_external_connection_stmt ::=
 	'CREATE' 'EXTERNAL' 'CONNECTION' label_spec 'AS' string_or_placeholder
 
+create_tenant_stmt ::=
+	'CREATE' 'TENANT' name
+	| 'CREATE' 'TENANT' name 'FROM' 'REPLICATION' 'OF' name 'ON' string_or_placeholder
+
 opt_with_clause ::=
 	with_clause
 	| 
@@ -634,6 +641,10 @@ drop_schedule_stmt ::=
 
 drop_external_connection_stmt ::=
 	'DROP' 'EXTERNAL' 'CONNECTION' string_or_placeholder
+
+drop_tenant_stmt ::=
+	'DROP' 'TENANT' name
+	| 'DROP' 'TENANT' 'IF' 'EXISTS' name
 
 explainable_stmt ::=
 	preparable_stmt
@@ -911,6 +922,9 @@ show_tables_stmt ::=
 	'SHOW' 'TABLES' 'FROM' name '.' name with_comment
 	| 'SHOW' 'TABLES' 'FROM' name with_comment
 	| 'SHOW' 'TABLES' with_comment
+
+show_tenant_stmt ::=
+	'SHOW' 'TENANT' name
 
 show_trace_stmt ::=
 	'SHOW' opt_compact 'TRACE' 'FOR' 'SESSION'

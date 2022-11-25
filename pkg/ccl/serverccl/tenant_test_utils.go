@@ -230,7 +230,7 @@ func newTenantClusterHelper(
 	var cluster tenantCluster = make([]TestTenant, tenantClusterSize)
 	for i := 0; i < tenantClusterSize; i++ {
 		cluster[i] =
-			newTestTenant(t, server, roachpb.MakeTenantID(tenantID), knobs)
+			newTestTenant(t, server, roachpb.MustMakeTenantID(tenantID), knobs)
 	}
 
 	return cluster
@@ -312,6 +312,10 @@ func (c *httpClient) PostJSONChecked(
 	path string, request protoutil.Message, response protoutil.Message,
 ) error {
 	return httputil.PostJSON(c.client, c.baseURL+path, request, response)
+}
+
+func (c *httpClient) PostJSONRawChecked(path string, request []byte) (*http.Response, error) {
+	return httputil.PostJSONRaw(c.client, c.baseURL+path, request)
 }
 
 func (c *httpClient) Close() {

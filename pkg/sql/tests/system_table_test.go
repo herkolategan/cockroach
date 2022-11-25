@@ -53,7 +53,7 @@ func TestInitialKeys(t *testing.T) {
 			codec = keys.SystemSQLCodec
 			nonDescKeys = 14
 		} else {
-			codec = keys.MakeSQLCodec(roachpb.MakeTenantID(5))
+			codec = keys.MakeSQLCodec(roachpb.MustMakeTenantID(5))
 			nonDescKeys = 4
 		}
 
@@ -127,7 +127,7 @@ func TestInitialKeysAndSplits(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				codec = keys.MakeSQLCodec(roachpb.MakeTenantID(id))
+				codec = keys.MakeSQLCodec(roachpb.MustMakeTenantID(id))
 			}
 
 			ms := bootstrap.MakeMetadataSchema(
@@ -180,13 +180,13 @@ func TestSystemTableLiterals(t *testing.T) {
 	s := tc.Servers[0]
 
 	testcases := make(map[string]testcase)
-	for schema, desc := range systemschema.SystemTableDescriptors {
-		if _, alreadyExists := testcases[desc.GetName()]; alreadyExists {
-			t.Fatalf("system table %q already exists", desc.GetName())
+	for _, table := range systemschema.MakeSystemTables() {
+		if _, alreadyExists := testcases[table.GetName()]; alreadyExists {
+			t.Fatalf("system table %q already exists", table.GetName())
 		}
-		testcases[desc.GetName()] = testcase{
-			schema: schema,
-			pkg:    desc,
+		testcases[table.GetName()] = testcase{
+			schema: table.Schema,
+			pkg:    table,
 		}
 	}
 

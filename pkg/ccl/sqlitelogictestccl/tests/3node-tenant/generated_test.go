@@ -69,9 +69,14 @@ func runSqliteLogicTest(t *testing.T, file string) {
 		skip.IgnoreLint(t, "-bigtest flag must be specified to run this test")
 	}
 	// SQLLite logic tests can be very memory intensive, so we give them larger
-	// limit than other logic tests get.
+	// limit than other logic tests get. Also some of the 'delete' files become
+	// extremely slow when MVCC range tombstones are enabled for point deletes,
+	// so we disable that. Similarly, some of the 'view' files are too slow
+	// when small engine blocks are enabled.
 	serverArgs := logictest.TestServerArgs{
 		MaxSQLMemoryLimit: 512 << 20, // 512 MiB
+		DisableUseMVCCRangeTombstonesForPointDeletes: true,
+		DisableSmallEngineBlocks:                     true,
 	}
 	logictest.RunLogicTest(t, serverArgs, configIdx, filepath.Join(sqliteLogicTestDir, file))
 }

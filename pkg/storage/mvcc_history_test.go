@@ -97,7 +97,7 @@ var (
 // put_rangekey   ts=<int>[,<int>] [localTs=<int>[,<int>]] k=<key> end=<key>
 // get            [t=<name>] [ts=<int>[,<int>]]                         [resolve [status=<txnstatus>]] k=<key> [inconsistent] [skipLocked] [tombstones] [failOnMoreRecent] [localUncertaintyLimit=<int>[,<int>]] [globalUncertaintyLimit=<int>[,<int>]]
 // scan           [t=<name>] [ts=<int>[,<int>]]                         [resolve [status=<txnstatus>]] k=<key> [end=<key>] [inconsistent] [skipLocked] [tombstones] [reverse] [failOnMoreRecent] [localUncertaintyLimit=<int>[,<int>]] [globalUncertaintyLimit=<int>[,<int>]] [max=<max>] [targetbytes=<target>] [allowEmpty]
-// export         [k=<key>] [end=<key>] [ts=<int>[,<int>]] [kTs=<int>[,<int>]] [startTs=<int>[,<int>]] [maxIntents=<int>] [allRevisions] [targetSize=<int>] [maxSize=<int>] [stopMidKey]
+// export         [k=<key>] [end=<key>] [ts=<int>[,<int>]] [kTs=<int>[,<int>]] [startTs=<int>[,<int>]] [maxIntents=<int>] [allRevisions] [targetSize=<int>] [maxSize=<int>] [stopMidKey] [fingerprint]
 //
 // iter_new       [k=<key>] [end=<key>] [prefix] [kind=key|keyAndIntents] [types=pointsOnly|pointsWithRanges|pointsAndRanges|rangesOnly] [pointSynthesis] [maskBelow=<int>[,<int>]]
 // iter_new_incremental [k=<key>] [end=<key>] [startTs=<int>[,<int>]] [endTs=<int>[,<int>]] [types=pointsOnly|pointsWithRanges|pointsAndRanges|rangesOnly] [maskBelow=<int>[,<int>]] [intents=error|aggregate|emit]
@@ -1282,6 +1282,10 @@ func cmdPut(e *evalCtx) error {
 	key := e.getKey()
 	val := e.getVal()
 
+	if e.hasArg("init-checksum") {
+		val.InitChecksum(key)
+	}
+
 	resolve, resolveStatus := e.getResolve()
 
 	return e.withWriter("put", func(rw storage.ReadWriter) error {
@@ -1321,6 +1325,10 @@ func cmdExport(e *evalCtx) error {
 		EndTS:              e.getTs(nil),
 		ExportAllRevisions: e.hasArg("allRevisions"),
 		StopMidKey:         e.hasArg("stopMidKey"),
+		FingerprintOptions: storage.MVCCExportFingerprintOptions{
+			StripTenantPrefix:  e.hasArg("stripTenantPrefix"),
+			StripValueChecksum: e.hasArg("stripValueChecksum"),
+		},
 	}
 	if e.hasArg("maxIntents") {
 		e.scanArg("maxIntents", &opts.MaxIntents)
@@ -1331,21 +1339,43 @@ func cmdExport(e *evalCtx) error {
 	if e.hasArg("maxSize") {
 		e.scanArg("maxSize", &opts.MaxSize)
 	}
+	var shouldFingerprint bool
+	if e.hasArg("fingerprint") {
+		shouldFingerprint = true
+	}
 
 	r := e.newReader()
 	defer r.Close()
 
 	sstFile := &storage.MemFile{}
-	summary, resume, err := storage.MVCCExportToSST(e.ctx, e.st, r, opts, sstFile)
-	if err != nil {
-		return err
+
+	var summary roachpb.BulkOpSummary
+	var resume storage.MVCCKey
+	var fingerprint uint64
+	var err error
+	if shouldFingerprint {
+		summary, resume, fingerprint, err = storage.MVCCExportFingerprint(e.ctx, e.st, r, opts, sstFile)
+		if err != nil {
+			return err
+		}
+		e.results.buf.Printf("export: %s", &summary)
+		e.results.buf.Print(" fingerprint=true")
+	} else {
+		summary, resume, err = storage.MVCCExportToSST(e.ctx, e.st, r, opts, sstFile)
+		if err != nil {
+			return err
+		}
+		e.results.buf.Printf("export: %s", &summary)
 	}
 
-	e.results.buf.Printf("export: %s", &summary)
 	if resume.Key != nil {
 		e.results.buf.Printf(" resume=%s", resume)
 	}
 	e.results.buf.Printf("\n")
+
+	if shouldFingerprint {
+		e.results.buf.Printf("fingerprint: %d\n", fingerprint)
+	}
 
 	iter, err := storage.NewMemSSTIterator(sstFile.Bytes(), false /* verify */, storage.IterOptions{
 		KeyTypes:   storage.IterKeyTypePointsAndRanges,
@@ -2170,21 +2200,31 @@ func (e *evalCtx) getKey() roachpb.Key {
 	e.t.Helper()
 	var keyS string
 	e.scanArg("k", &keyS)
-	return toKey(keyS)
+	return toKey(keyS, e.getTenantCodec())
 }
 
 func (e *evalCtx) getKeyRange() (sk, ek roachpb.Key) {
 	e.t.Helper()
 	var keyS string
 	e.scanArg("k", &keyS)
-	sk = toKey(keyS)
+	codec := e.getTenantCodec()
+	sk = toKey(keyS, codec)
 	ek = sk.Next()
 	if e.hasArg("end") {
 		var endKeyS string
 		e.scanArg("end", &endKeyS)
-		ek = toKey(endKeyS)
+		ek = toKey(endKeyS, codec)
 	}
 	return sk, ek
+}
+
+func (e *evalCtx) getTenantCodec() keys.SQLCodec {
+	if e.hasArg("tenant-prefix") {
+		var tenantID int
+		e.scanArg("tenant-prefix", &tenantID)
+		return keys.MakeSQLCodec(roachpb.TenantID{InternalValue: uint64(tenantID)})
+	}
+	return keys.SystemSQLCodec
 }
 
 func (e *evalCtx) newTxn(
@@ -2402,7 +2442,7 @@ func (e *evalCtx) metamorphicPeekBounds(
 	return rw, leftPeekBound, rightPeekBound
 }
 
-func toKey(s string) roachpb.Key {
+func toKey(s string, sqlCodec keys.SQLCodec) roachpb.Key {
 	if len(s) == 0 {
 		return roachpb.Key(s)
 	}
@@ -2434,7 +2474,7 @@ func toKey(s string) roachpb.Key {
 
 		var colMap catalog.TableColMap
 		colMap.Set(0, 0)
-		key := keys.SystemSQLCodec.IndexPrefix(1, 1)
+		key := sqlCodec.IndexPrefix(1, 1)
 		key, _, err = rowenc.EncodeColumns([]descpb.ColumnID{0}, nil /* directions */, colMap, []tree.Datum{tree.NewDString(pk)}, key)
 		if err != nil {
 			panic(err)

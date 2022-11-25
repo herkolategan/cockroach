@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"math"
 	"runtime"
@@ -56,12 +57,12 @@ const (
 	// minimum total for a single store node must be under 2048 for Windows
 	// compatibility.
 	MinimumMaxOpenFiles = 1700
-	// Default value for maximum number of intents reported by ExportToSST
-	// and Scan operations in WriteIntentError is set to half of the maximum
-	// lock table size.
-	// This value is subject to tuning in real environment as we have more
-	// data available.
-	maxIntentsPerWriteIntentErrorDefault = 5000
+	// MaxIntentsPerWriteIntentErrorDefault is the default value for maximum
+	// number of intents reported by ExportToSST and Scan operations in
+	// WriteIntentError is set to half of the maximum lock table size.
+	// This value is subject to tuning in real environment as we have more data
+	// available.
+	MaxIntentsPerWriteIntentErrorDefault = 5000
 )
 
 var minWALSyncInterval = settings.RegisterDurationSetting(
@@ -81,7 +82,7 @@ var minWALSyncInterval = settings.RegisterDurationSetting(
 // being written, but already written tombstones will remain until GCed. The
 // above note on jobs also applies in this case.
 var MVCCRangeTombstonesEnabled = settings.RegisterBoolSetting(
-	settings.SystemOnly,
+	settings.TenantReadOnly,
 	"storage.mvcc.range_tombstones.enabled",
 	"enables the use of MVCC range tombstones",
 	true)
@@ -102,7 +103,8 @@ var MaxIntentsPerWriteIntentError = settings.RegisterIntSetting(
 	settings.TenantWritable,
 	"storage.mvcc.max_intents_per_error",
 	"maximum number of intents returned in error during export of scan requests",
-	maxIntentsPerWriteIntentErrorDefault)
+	MaxIntentsPerWriteIntentErrorDefault,
+)
 
 var rocksdbConcurrency = envutil.EnvOrDefaultInt(
 	"COCKROACH_ROCKSDB_CONCURRENCY", func() int {
@@ -888,6 +890,14 @@ type MVCCGetOptions struct {
 	// LockTable is used to determine whether keys are locked in the in-memory
 	// lock table when scanning with the SkipLocked option.
 	LockTable LockTableView
+	// DontInterleaveIntents, when set, makes it such that intent metadata is not
+	// interleaved with the results of the scan. Setting this option means that
+	// the underlying pebble iterator will only scan over the MVCC keyspace and
+	// will not use an `intentInterleavingIter`. It is only appropriate to use
+	// this when the caller does not need to know whether a given key is an intent
+	// or not. It is usually set by read-only requests that have resolved their
+	// conflicts before they begin their MVCC scan.
+	DontInterleaveIntents bool
 }
 
 func (opts *MVCCGetOptions) validate() error {
@@ -900,6 +910,9 @@ func (opts *MVCCGetOptions) validate() error {
 	if opts.Inconsistent && opts.FailOnMoreRecent {
 		return errors.Errorf("cannot allow inconsistent reads with fail on more recent option")
 	}
+	if opts.DontInterleaveIntents && opts.SkipLocked {
+		return errors.Errorf("cannot disable interleaved intents with skip locked option")
+	}
 	return nil
 }
 
@@ -908,12 +921,16 @@ func (opts *MVCCGetOptions) errOnIntents() bool {
 }
 
 // newMVCCIterator sets up a suitable iterator for high-level MVCC operations
-// operating at the given timestamp. If timestamp is empty, the iterator is
-// considered to be used for inline values, disabling intents and range keys.
-// If rangeKeyMasking is true, IterOptions.RangeKeyMaskingBelow is set to the
-// given timestamp.
+// operating at the given timestamp. If timestamp is empty or if
+// `noInterleavedIntents` is set, the iterator is considered to be used for
+// inline values, disabling intents and range keys. If rangeKeyMasking is true,
+// IterOptions.RangeKeyMaskingBelow is set to the given timestamp.
 func newMVCCIterator(
-	reader Reader, timestamp hlc.Timestamp, rangeKeyMasking bool, opts IterOptions,
+	reader Reader,
+	timestamp hlc.Timestamp,
+	rangeKeyMasking bool,
+	noInterleavedIntents bool,
+	opts IterOptions,
 ) MVCCIterator {
 	// If reading inline then just return a plain MVCCIterator without intents.
 	// However, we allow the caller to enable range keys, since they may be needed
@@ -926,7 +943,11 @@ func newMVCCIterator(
 		opts.RangeKeyMaskingBelow.IsEmpty() {
 		opts.RangeKeyMaskingBelow = timestamp
 	}
-	return reader.NewMVCCIterator(MVCCKeyAndIntentsIterKind, opts)
+	iterKind := MVCCKeyAndIntentsIterKind
+	if noInterleavedIntents {
+		iterKind = MVCCKeyIterKind
+	}
+	return reader.NewMVCCIterator(iterKind, opts)
 }
 
 // MVCCGet returns the most recent value for the specified key whose timestamp
@@ -970,10 +991,12 @@ func newMVCCIterator(
 func MVCCGet(
 	ctx context.Context, reader Reader, key roachpb.Key, timestamp hlc.Timestamp, opts MVCCGetOptions,
 ) (*roachpb.Value, *roachpb.Intent, error) {
-	iter := newMVCCIterator(reader, timestamp, false /* rangeKeyMasking */, IterOptions{
-		KeyTypes: IterKeyTypePointsAndRanges,
-		Prefix:   true,
-	})
+	iter := newMVCCIterator(
+		reader, timestamp, false /* rangeKeyMasking */, opts.DontInterleaveIntents, IterOptions{
+			KeyTypes: IterKeyTypePointsAndRanges,
+			Prefix:   true,
+		},
+	)
 	defer iter.Close()
 	value, intent, err := mvccGet(ctx, iter, key, timestamp, opts)
 	return value.ToPointer(), intent, err
@@ -1310,10 +1333,12 @@ func MVCCPut(
 	var iter MVCCIterator
 	blind := ms == nil && timestamp.IsEmpty()
 	if !blind {
-		iter = newMVCCIterator(rw, timestamp, false /* rangeKeyMasking */, IterOptions{
-			KeyTypes: IterKeyTypePointsAndRanges,
-			Prefix:   true,
-		})
+		iter = newMVCCIterator(
+			rw, timestamp, false /* rangeKeyMasking */, false /* noInterleavedIntents */, IterOptions{
+				KeyTypes: IterKeyTypePointsAndRanges,
+				Prefix:   true,
+			},
+		)
 		defer iter.Close()
 	}
 	return mvccPutUsingIter(ctx, rw, iter, ms, key, timestamp, localTimestamp, value, txn, nil)
@@ -1360,10 +1385,12 @@ func MVCCDelete(
 	localTimestamp hlc.ClockTimestamp,
 	txn *roachpb.Transaction,
 ) (foundKey bool, err error) {
-	iter := newMVCCIterator(rw, timestamp, false /* rangeKeyMasking */, IterOptions{
-		KeyTypes: IterKeyTypePointsAndRanges,
-		Prefix:   true,
-	})
+	iter := newMVCCIterator(
+		rw, timestamp, false /* rangeKeyMasking */, false /* noInterleavedIntents */, IterOptions{
+			KeyTypes: IterKeyTypePointsAndRanges,
+			Prefix:   true,
+		},
+	)
 	defer iter.Close()
 
 	buf := newPutBuffer()
@@ -2093,10 +2120,12 @@ func MVCCIncrement(
 	txn *roachpb.Transaction,
 	inc int64,
 ) (int64, error) {
-	iter := newMVCCIterator(rw, timestamp, false /* rangeKeyMasking */, IterOptions{
-		KeyTypes: IterKeyTypePointsAndRanges,
-		Prefix:   true,
-	})
+	iter := newMVCCIterator(
+		rw, timestamp, false /* rangeKeyMasking */, false /* noInterleavedIntents */, IterOptions{
+			KeyTypes: IterKeyTypePointsAndRanges,
+			Prefix:   true,
+		},
+	)
 	defer iter.Close()
 
 	var int64Val int64
@@ -2170,10 +2199,12 @@ func MVCCConditionalPut(
 	allowIfDoesNotExist CPutMissingBehavior,
 	txn *roachpb.Transaction,
 ) error {
-	iter := newMVCCIterator(rw, timestamp, false /* rangeKeyMasking */, IterOptions{
-		KeyTypes: IterKeyTypePointsAndRanges,
-		Prefix:   true,
-	})
+	iter := newMVCCIterator(
+		rw, timestamp, false /* rangeKeyMasking */, false /* noInterleavedIntents */, IterOptions{
+			KeyTypes: IterKeyTypePointsAndRanges,
+			Prefix:   true,
+		},
+	)
 	defer iter.Close()
 
 	return mvccConditionalPutUsingIter(
@@ -2255,10 +2286,12 @@ func MVCCInitPut(
 	failOnTombstones bool,
 	txn *roachpb.Transaction,
 ) error {
-	iter := newMVCCIterator(rw, timestamp, false /* rangeKeyMasking */, IterOptions{
-		KeyTypes: IterKeyTypePointsAndRanges,
-		Prefix:   true,
-	})
+	iter := newMVCCIterator(
+		rw, timestamp, false /* rangeKeyMasking */, false /* noInterleavedIntents */, IterOptions{
+			KeyTypes: IterKeyTypePointsAndRanges,
+			Prefix:   true,
+		},
+	)
 	defer iter.Close()
 	return mvccInitPutUsingIter(ctx, rw, iter, ms, key, timestamp, localTimestamp, value, failOnTombstones, txn)
 }
@@ -2854,10 +2887,12 @@ func MVCCDeleteRange(
 
 	buf := newPutBuffer()
 	defer buf.release()
-	iter := newMVCCIterator(rw, timestamp, false /* rangeKeyMasking */, IterOptions{
-		KeyTypes: IterKeyTypePointsAndRanges,
-		Prefix:   true,
-	})
+	iter := newMVCCIterator(
+		rw, timestamp, false /* rangeKeyMasking */, false /* noInterleavedIntents */, IterOptions{
+			KeyTypes: IterKeyTypePointsAndRanges,
+			Prefix:   true,
+		},
+	)
 	defer iter.Close()
 
 	var keys []roachpb.Key
@@ -3017,10 +3052,12 @@ func MVCCPredicateDeleteRange(
 
 	// Create some reusable machinery for flushing a run with point tombstones
 	// that is typically used in a single MVCCPut call.
-	pointTombstoneIter := newMVCCIterator(rw, endTime, false /* rangeKeyMasking */, IterOptions{
-		KeyTypes: IterKeyTypePointsAndRanges,
-		Prefix:   true,
-	})
+	pointTombstoneIter := newMVCCIterator(
+		rw, endTime, false /* rangeKeyMasking */, false /* noInterleavedIntents */, IterOptions{
+			KeyTypes: IterKeyTypePointsAndRanges,
+			Prefix:   true,
+		},
+	)
 	defer pointTombstoneIter.Close()
 	pointTombstoneBuf := newPutBuffer()
 	defer pointTombstoneBuf.release()
@@ -3677,6 +3714,14 @@ type MVCCScanOptions struct {
 	// LockTable is used to determine whether keys are locked in the in-memory
 	// lock table when scanning with the SkipLocked option.
 	LockTable LockTableView
+	// DontInterleaveIntents, when set, makes it such that intent metadata is not
+	// interleaved with the results of the scan. Setting this option means that
+	// the underlying pebble iterator will only scan over the MVCC keyspace and
+	// will not use an `intentInterleavingIter`. It is only appropriate to use
+	// this when the caller does not need to know whether a given key is an intent
+	// or not. It is usually set by read-only requests that have resolved their
+	// conflicts before they begin their MVCC scan.
+	DontInterleaveIntents bool
 }
 
 func (opts *MVCCScanOptions) validate() error {
@@ -3688,6 +3733,9 @@ func (opts *MVCCScanOptions) validate() error {
 	}
 	if opts.Inconsistent && opts.FailOnMoreRecent {
 		return errors.Errorf("cannot allow inconsistent reads with fail on more recent option")
+	}
+	if opts.DontInterleaveIntents && opts.SkipLocked {
+		return errors.Errorf("cannot disable interleaved intents with skip locked option")
 	}
 	return nil
 }
@@ -3775,11 +3823,13 @@ func MVCCScan(
 	timestamp hlc.Timestamp,
 	opts MVCCScanOptions,
 ) (MVCCScanResult, error) {
-	iter := newMVCCIterator(reader, timestamp, !opts.Tombstones, IterOptions{
-		KeyTypes:   IterKeyTypePointsAndRanges,
-		LowerBound: key,
-		UpperBound: endKey,
-	})
+	iter := newMVCCIterator(
+		reader, timestamp, !opts.Tombstones, opts.DontInterleaveIntents, IterOptions{
+			KeyTypes:   IterKeyTypePointsAndRanges,
+			LowerBound: key,
+			UpperBound: endKey,
+		},
+	)
 	defer iter.Close()
 	return mvccScanToKvs(ctx, iter, key, endKey, timestamp, opts)
 }
@@ -3792,11 +3842,13 @@ func MVCCScanToBytes(
 	timestamp hlc.Timestamp,
 	opts MVCCScanOptions,
 ) (MVCCScanResult, error) {
-	iter := newMVCCIterator(reader, timestamp, !opts.Tombstones, IterOptions{
-		KeyTypes:   IterKeyTypePointsAndRanges,
-		LowerBound: key,
-		UpperBound: endKey,
-	})
+	iter := newMVCCIterator(
+		reader, timestamp, !opts.Tombstones, opts.DontInterleaveIntents, IterOptions{
+			KeyTypes:   IterKeyTypePointsAndRanges,
+			LowerBound: key,
+			UpperBound: endKey,
+		},
+	)
 	defer iter.Close()
 	return mvccScanToBytes(ctx, iter, key, endKey, timestamp, opts)
 }
@@ -3841,11 +3893,13 @@ func MVCCIterate(
 	opts MVCCScanOptions,
 	f func(roachpb.KeyValue) error,
 ) ([]roachpb.Intent, error) {
-	iter := newMVCCIterator(reader, timestamp, !opts.Tombstones, IterOptions{
-		KeyTypes:   IterKeyTypePointsAndRanges,
-		LowerBound: key,
-		UpperBound: endKey,
-	})
+	iter := newMVCCIterator(
+		reader, timestamp, !opts.Tombstones, opts.DontInterleaveIntents, IterOptions{
+			KeyTypes:   IterKeyTypePointsAndRanges,
+			LowerBound: key,
+			UpperBound: endKey,
+		},
+	)
 	defer iter.Close()
 
 	var intents []roachpb.Intent
@@ -5766,9 +5820,93 @@ func MVCCIsSpanEmpty(
 	return !valid, nil
 }
 
+// MVCCExportFingerprint exports a fingerprint for point keys in the keyrange
+// [StartKey, EndKey) over the interval (StartTS, EndTS]. Each key/timestamp and
+// value is hashed using a fnv64 hasher, and combined into a running aggregate
+// via a XOR. On completion of the export this aggregate is returned as the
+// fingerprint.
+//
+// Range keys are not fingerprinted but instead written to a pebble SST that is
+// returned to the caller. This is because range keys do not have a stable,
+// discrete identity and so it is up to the caller to define a deterministic
+// fingerprinting scheme across all returned range keys.
+func MVCCExportFingerprint(
+	ctx context.Context, cs *cluster.Settings, reader Reader, opts MVCCExportOptions, dest io.Writer,
+) (roachpb.BulkOpSummary, MVCCKey, uint64, error) {
+	ctx, span := tracing.ChildSpan(ctx, "storage.MVCCExportToSST")
+	defer span.Finish()
+
+	hasher := fnv.New64()
+	fingerprintWriter := makeFingerprintWriter(ctx, hasher, cs, dest, opts.FingerprintOptions)
+	defer fingerprintWriter.Close()
+
+	summary, resumeKey, err := mvccExportToWriter(ctx, reader, opts, &fingerprintWriter)
+	if err != nil {
+		return roachpb.BulkOpSummary{}, MVCCKey{}, 0, err
+	}
+
+	fingerprint, err := fingerprintWriter.Finish()
+	return summary, resumeKey, fingerprint, err
+}
+
 // MVCCExportToSST exports changes to the keyrange [StartKey, EndKey) over the
-// interval (StartTS, EndTS] as a Pebble SST. See MVCCExportOptions for options.
-// StartTS may be zero.
+// interval (StartTS, EndTS] as a Pebble SST. See mvccExportToWriter for more
+// details.
+func MVCCExportToSST(
+	ctx context.Context, cs *cluster.Settings, reader Reader, opts MVCCExportOptions, dest io.Writer,
+) (roachpb.BulkOpSummary, MVCCKey, error) {
+	ctx, span := tracing.ChildSpan(ctx, "storage.MVCCExportToSST")
+	defer span.Finish()
+	sstWriter := MakeBackupSSTWriter(ctx, cs, dest)
+	defer sstWriter.Close()
+
+	summary, resumeKey, err := mvccExportToWriter(ctx, reader, opts, &sstWriter)
+	if err != nil {
+		return roachpb.BulkOpSummary{}, MVCCKey{}, err
+	}
+
+	if summary.DataSize == 0 {
+		// If no records were added to the sstable, skip completing it and return a
+		// nil slice – the export code will discard it anyway (based on 0 DataSize).
+		return roachpb.BulkOpSummary{}, MVCCKey{}, nil
+	}
+
+	return summary, resumeKey, sstWriter.Finish()
+}
+
+// ExportWriter is a trimmed down version of the Writer interface. It contains
+// only those methods used during ExportRequest command evaluation.
+type ExportWriter interface {
+	// PutRawMVCCRangeKey writes an MVCC range key with the provided encoded
+	// MVCCValue. It will replace any overlapping range keys at the given
+	// timestamp (even partial overlap). Only MVCC range tombstones, i.e. an empty
+	// value, are currently allowed (other kinds will need additional handling in
+	// MVCC APIs and elsewhere, e.g. stats and GC). It can be used to avoid
+	// decoding and immediately re-encoding an MVCCValue, but should generally be
+	// avoided due to the lack of type safety.
+	//
+	// It is safe to modify the contents of the arguments after PutRawMVCCRangeKey
+	// returns.
+	PutRawMVCCRangeKey(MVCCRangeKey, []byte) error
+	// PutRawMVCC sets the given key to the encoded MVCCValue. It requires that
+	// the timestamp is non-empty (see {PutUnversioned,PutIntent} if the timestamp
+	// is empty). It can be used to avoid decoding and immediately re-encoding an
+	// MVCCValue, but should generally be avoided due to the lack of type safety.
+	//
+	// It is safe to modify the contents of the arguments after PutRawMVCC
+	// returns.
+	PutRawMVCC(key MVCCKey, value []byte) error
+	// PutUnversioned sets the given key to the value provided. It is for use
+	// with inline metadata (not intents) and other unversioned keys (like
+	// Range-ID local keys).
+	//
+	// It is safe to modify the contents of the arguments after Put returns.
+	PutUnversioned(key roachpb.Key, value []byte) error
+}
+
+// mvccExportToWriter exports changes to the keyrange [StartKey, EndKey) over
+// the interval (StartTS, EndTS] to the passed in writer. See MVCCExportOptions
+// for options. StartTS may be zero.
 //
 // This comes in two principal flavors: all revisions or latest revision only.
 // In all-revisions mode, exports everything matching the span and time bounds,
@@ -5788,17 +5926,12 @@ func MVCCIsSpanEmpty(
 // intents outside are ignored.
 //
 // Returns an export summary and a resume key that allows resuming the export if
-// it reached a limit. Data is written to dest as it is collected. If an error
-// is returned then dest contents are undefined.
-func MVCCExportToSST(
-	ctx context.Context, cs *cluster.Settings, reader Reader, opts MVCCExportOptions, dest io.Writer,
+// it reached a limit. Data is written to the writer as it is collected. If an
+// error is returned then the writer's contents are undefined. It is the
+// responsibility of the caller to Finish() / Close() the passed in writer.
+func mvccExportToWriter(
+	ctx context.Context, reader Reader, opts MVCCExportOptions, writer ExportWriter,
 ) (roachpb.BulkOpSummary, MVCCKey, error) {
-	var span *tracing.Span
-	ctx, span = tracing.ChildSpan(ctx, "storage.MVCCExportToSST")
-	defer span.Finish()
-	sstWriter := MakeBackupSSTWriter(ctx, cs, dest)
-	defer sstWriter.Close()
-
 	// If we're not exporting all revisions then we can mask point keys below any
 	// MVCC range tombstones, since we don't care about them.
 	var rangeKeyMasking hlc.Timestamp
@@ -5936,7 +6069,7 @@ func MVCCExportToSST(
 				}
 				// Export only the inner roachpb.Value, not the MVCCValue header.
 				rawValue := mvccValue.Value.RawBytes
-				if err := sstWriter.PutRawMVCCRangeKey(rangeKeys.AsRangeKey(v), rawValue); err != nil {
+				if err := writer.PutRawMVCCRangeKey(rangeKeys.AsRangeKey(v), rawValue); err != nil {
 					return roachpb.BulkOpSummary{}, MVCCKey{}, err
 				}
 			}
@@ -6047,11 +6180,11 @@ func MVCCExportToSST(
 			if unsafeKey.Timestamp.IsEmpty() {
 				// This should never be an intent since the incremental iterator returns
 				// an error when encountering intents.
-				if err := sstWriter.PutUnversioned(unsafeKey.Key, unsafeValue); err != nil {
+				if err := writer.PutUnversioned(unsafeKey.Key, unsafeValue); err != nil {
 					return roachpb.BulkOpSummary{}, MVCCKey{}, errors.Wrapf(err, "adding key %s", unsafeKey)
 				}
 			} else {
-				if err := sstWriter.PutRawMVCC(unsafeKey, unsafeValue); err != nil {
+				if err := writer.PutRawMVCC(unsafeKey, unsafeValue); err != nil {
 					return roachpb.BulkOpSummary{}, MVCCKey{}, errors.Wrapf(err, "adding key %s", unsafeKey)
 				}
 			}
@@ -6109,21 +6242,11 @@ func MVCCExportToSST(
 			}
 			// Export only the inner roachpb.Value, not the MVCCValue header.
 			rawValue := mvccValue.Value.RawBytes
-			if err := sstWriter.PutRawMVCCRangeKey(rangeKeys.AsRangeKey(v), rawValue); err != nil {
+			if err := writer.PutRawMVCCRangeKey(rangeKeys.AsRangeKey(v), rawValue); err != nil {
 				return roachpb.BulkOpSummary{}, MVCCKey{}, err
 			}
 		}
 		rows.BulkOpSummary.DataSize += rangeKeysSize
-	}
-
-	if rows.BulkOpSummary.DataSize == 0 {
-		// If no records were added to the sstable, skip completing it and return a
-		// nil slice – the export code will discard it anyway (based on 0 DataSize).
-		return roachpb.BulkOpSummary{}, MVCCKey{}, nil
-	}
-
-	if err := sstWriter.Finish(); err != nil {
-		return roachpb.BulkOpSummary{}, MVCCKey{}, err
 	}
 
 	return rows.BulkOpSummary, resumeKey, nil
@@ -6179,6 +6302,19 @@ type MVCCExportOptions struct {
 	// resources. Export queries limiter in its iteration loop to break out once
 	// resources are exhausted.
 	ResourceLimiter ResourceLimiter
+	// FingerprintOptions controls how fingerprints are generated
+	// when using MVCCExportFingerprint.
+	FingerprintOptions MVCCExportFingerprintOptions
+}
+
+type MVCCExportFingerprintOptions struct {
+	// If StripTenantPrefix is true, keys that appear to be
+	// tenant-prefixed have the tenant-prefix removed before
+	// hashing.
+	StripTenantPrefix bool
+	// If StripValueChecksum is true, checksums are removed from
+	// the value before hashing.
+	StripValueChecksum bool
 }
 
 // MVCCIsSpanEmptyOptions configures the MVCCIsSpanEmpty function.

@@ -88,12 +88,6 @@ func (p *planner) AlterTenantSetClusterSetting(
 		return nil, errors.AssertionFailedf("expected writable setting, got %T", v)
 	}
 
-	// We don't support changing the version for another tenant.
-	// See discussion on issue https://github.com/cockroachdb/cockroach/issues/77733 (wontfix).
-	if _, isVersion := setting.(*settings.VersionSetting); isVersion {
-		return nil, errors.Newf("cannot change the version of another tenant")
-	}
-
 	value, err := p.getAndValidateTypedClusterSetting(ctx, name, n.Value, setting)
 	if err != nil {
 		return nil, err
@@ -190,7 +184,7 @@ func resolveTenantID(
 	if *tenantID == 0 {
 		return 0, nil, pgerror.Newf(pgcode.InvalidParameterValue, "tenant ID must be non-zero")
 	}
-	if roachpb.MakeTenantID(uint64(*tenantID)) == roachpb.SystemTenantID {
+	if roachpb.MustMakeTenantID(uint64(*tenantID)) == roachpb.SystemTenantID {
 		return 0, nil, errors.WithHint(pgerror.Newf(pgcode.InvalidParameterValue,
 			"cannot use this statement to access cluster settings in system tenant"),
 			"Use a regular SHOW/SET CLUSTER SETTING statement.")

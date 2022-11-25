@@ -47,8 +47,6 @@ go_library(
         "//pkg/sql/sessiondatapb",
         "//pkg/sql/sqlerrors",
         "//pkg/sql/types",
-        "//pkg/util/log",
-        "//pkg/util/timeutil",
         "//pkg/util/uuid",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_cockroachdb_redact//:redact",
@@ -68,6 +66,7 @@ go_test(
     deps = [
         ":scbuild",
         "//pkg/base",
+        "//pkg/ccl/partitionccl",
         "//pkg/ccl/utilccl",
         "//pkg/security/securityassets",
         "//pkg/security/securitytest",

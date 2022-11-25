@@ -704,6 +704,7 @@ var charts = []sectionDescription{
 			{
 				Title: "Allocator Load-Based Lease Transfer Decisions",
 				Metrics: []string{
+					"kv.allocator.load_based_lease_transfers.follow_the_workload",
 					"kv.allocator.load_based_lease_transfers.should_transfer",
 					"kv.allocator.load_based_lease_transfers.missing_stats_for_existing_stores",
 					"kv.allocator.load_based_lease_transfers.delta_not_significant",
@@ -3746,6 +3747,18 @@ var charts = []sectionDescription{
 			{
 				Title:   "Execution duration for read batch evaluation.",
 				Metrics: []string{"kv.replica_write_batch_evaluate.latency"},
+			},
+		},
+	},
+	{
+		Organization: [][]string{{ReplicationLayer, "Batches"}},
+		Charts: []chartDescription{
+			{
+				Title: "Total number of attempts to evaluate read-only batches",
+				Metrics: []string{
+					"kv.replica_read_batch_evaluate.dropped_latches_before_eval",
+					"kv.replica_read_batch_evaluate.without_interleaving_iter",
+				},
 			},
 		},
 	},

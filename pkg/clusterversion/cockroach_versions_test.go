@@ -26,6 +26,32 @@ func TestVersionsAreValid(t *testing.T) {
 	require.NoError(t, versionsSingleton.Validate())
 }
 
+// TestPreserveVersionsForMinBinaryVersion ensures that versions
+// at or above binaryMinSupportedVersion are not deleted.
+func TestPreserveVersionsForMinBinaryVersion(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	prevVersion := keyedVersion{
+		Key:     -1,
+		Version: roachpb.Version{Major: 1, Minor: 1},
+	}
+	for _, namedVersion := range versionsSingleton {
+		v := namedVersion.Version
+		if v.Less(binaryMinSupportedVersion) {
+			prevVersion = namedVersion
+			continue
+		}
+		if v.Major == prevVersion.Major && v.Minor == prevVersion.Minor {
+			require.Equalf(t, prevVersion.Internal+2, v.Internal,
+				"version(s) between %s (%s) and %s (%s) is(are) at or above minBinaryVersion (%s) and should not be removed",
+				prevVersion.Key, prevVersion.Version,
+				namedVersion.Key, namedVersion.Version,
+				binaryMinSupportedVersion)
+		}
+		prevVersion = namedVersion
+	}
+}
+
 func TestVersionFormat(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
@@ -93,27 +119,27 @@ func TestGetVersionsBetween(t *testing.T) {
 			Version: roachpb.Version{Major: int32(i)},
 		})
 	}
-	cv := func(major int32) ClusterVersion {
-		return ClusterVersion{Version: roachpb.Version{Major: major}}
+	v := func(major int32) roachpb.Version {
+		return roachpb.Version{Major: major}
 	}
-	list := func(first, last int32) []ClusterVersion {
-		var cvs []ClusterVersion
+	list := func(first, last int32) []roachpb.Version {
+		var cvs []roachpb.Version
 		for i := first; i <= last; i++ {
-			cvs = append(cvs, cv(i))
+			cvs = append(cvs, v(i))
 		}
 		return cvs
 	}
 
 	var tests = []struct {
-		from, to ClusterVersion
-		exp      []ClusterVersion
+		from, to roachpb.Version
+		exp      []roachpb.Version
 	}{
-		{cv(5), cv(8), list(6, 8)},
-		{cv(1), cv(1), []ClusterVersion{}},
-		{cv(7), cv(7), []ClusterVersion{}},
-		{cv(1), cv(5), list(3, 5)},
-		{cv(6), cv(12), list(7, 9)},
-		{cv(4), cv(5), list(5, 5)},
+		{v(5), v(8), list(6, 8)},
+		{v(1), v(1), []roachpb.Version{}},
+		{v(7), v(7), []roachpb.Version{}},
+		{v(1), v(5), list(3, 5)},
+		{v(6), v(12), list(7, 9)},
+		{v(4), v(5), list(5, 5)},
 	}
 
 	for _, test := range tests {

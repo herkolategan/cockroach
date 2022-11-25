@@ -17,6 +17,7 @@ pkg/kv/kvserver/concurrency/lock/locking.go | `Durability`
 pkg/kv/kvserver/concurrency/lock/locking.go | `Strength`
 pkg/kv/kvserver/concurrency/lock/locking.go | `WaitPolicy`
 pkg/kv/kvserver/kvserverpb/raft.go | `SnapshotRequest_Type`
+pkg/repstream/streampb/streamid.go | `StreamID`
 pkg/roachpb/data.go | `LeaseSequence`
 pkg/roachpb/data.go | `ReplicaChangeType`
 pkg/roachpb/data.go | `TransactionStatus`
@@ -51,7 +52,6 @@ pkg/storage/enginepb/mvcc.go | `TxnEpoch`
 pkg/storage/enginepb/mvcc.go | `TxnSeq`
 pkg/storage/enginepb/mvcc3.go | `*MVCCStats`
 pkg/storage/enginepb/mvcc3.go | `MVCCStatsDelta`
-pkg/streaming/api.go | `StreamID`
 pkg/util/hlc/timestamp.go | `ClockTimestamp`
 pkg/util/hlc/timestamp.go | `LegacyTimestamp`
 pkg/util/hlc/timestamp.go | `Timestamp`

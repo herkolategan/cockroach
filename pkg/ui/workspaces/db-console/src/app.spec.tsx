@@ -23,13 +23,14 @@ stubComponentInModule(
   "default",
 );
 stubComponentInModule("src/views/statements/statementsPage", "default");
+stubComponentInModule("src/views/statements/statementDetails", "default");
 stubComponentInModule("src/views/transactions/transactionsPage", "default");
 stubComponentInModule(
-  "src/views/statements/activeStatementDetailsConnected",
+  "src/views/statements/recentStatementDetailsConnected",
   "default",
 );
 stubComponentInModule(
-  "src/views/transactions/activeTransactionDetailsConnected",
+  "src/views/transactions/recentTransactionDetailsConnected",
   "default",
 );
 stubComponentInModule("src/views/insights/workloadInsightsPage", "default");
@@ -63,7 +64,6 @@ const NODE_LOG_HEADER = /Logs Node.*/;
 const EVENTS_HEADER = "Events";
 const JOBS_HEADER = "Jobs";
 const SQL_ACTIVITY_HEADER = "SQL Activity";
-const STATEMENTS_DETAILS_HEADER = "Statement Fingerprint";
 const TRANSACTION_DETAILS_HEADER = "Transaction Details";
 const ADVANCED_DEBUG_HEADER = "Advanced Debugging";
 const REDUX_DEBUG_HEADER = "Redux State";
@@ -356,14 +356,14 @@ describe("Routing to", () => {
   describe("'/statements/:${appAttr}/:${statementAttr}' path", () => {
     test("routes to <StatementDetails> component", () => {
       navigateToPath("/statements/%24+internal/true");
-      screen.getByText(STATEMENTS_DETAILS_HEADER, { selector: "h3" });
+      screen.getByTestId("statementDetails");
     });
   });
 
   describe("'/statements/:${implicitTxnAttr}/:${statementAttr}' path", () => {
     test("routes to <StatementDetails> component", () => {
       navigateToPath("/statements/implicit-txn-attr/statement-attr");
-      screen.getByText(STATEMENTS_DETAILS_HEADER, { selector: "h3" });
+      screen.getByTestId("statementDetails");
     });
   });
 
@@ -379,7 +379,7 @@ describe("Routing to", () => {
   describe("'/statement/:${implicitTxnAttr}/:${statementAttr}' path", () => {
     test("routes to <StatementDetails> component", () => {
       navigateToPath("/statement/implicit-attr/statement-attr/");
-      screen.getByText(STATEMENTS_DETAILS_HEADER, { selector: "h3" });
+      screen.getByTestId("statementDetails");
     });
   });
 
@@ -394,7 +394,7 @@ describe("Routing to", () => {
       screen.getByRole("tab", { name: "Statements", selected: true });
     });
 
-    test("routes to <ActiveStatementsView> component with view=active", () => {
+    test("routes to <RecentStatementsView> component with view=active", () => {
       navigateToPath("/sql-activity?tab=Statements&view=active");
       screen.getByRole("tab", { name: "Statements", selected: true });
     });
@@ -414,7 +414,7 @@ describe("Routing to", () => {
       screen.getByRole("tab", { name: "Transactions", selected: true });
     });
 
-    test("routes to <ActiveTransactionsView> component with view=active", () => {
+    test("routes to <RecentTransactionsView> component with view=active", () => {
       navigateToPath("/sql-activity?tab=Transactions&view=active");
       screen.getByRole("tab", { name: "Transactions", selected: true });
     });
@@ -430,14 +430,14 @@ describe("Routing to", () => {
   // Active execution details.
 
   describe("'/execution' path", () => {
-    test("'/execution/statement/statementID' routes to <ActiveStatementDetails>", () => {
+    test("'/execution/statement/statementID' routes to <RecentStatementDetails>", () => {
       navigateToPath("/execution/statement/stmtID");
-      screen.getByTestId("activeStatementDetailsConnected");
+      screen.getByTestId("recentStatementDetailsConnected");
     });
 
-    test("'/execution/transaction/transactionID' routes to <ActiveTransactionDetails>", () => {
+    test("'/execution/transaction/transactionID' routes to <RecentTransactionDetails>", () => {
       navigateToPath("/execution/transaction/transactionID");
-      screen.getByTestId("activeTransactionDetailsConnected");
+      screen.getByTestId("recentTransactionDetailsConnected");
     });
   });
   {
@@ -498,9 +498,9 @@ describe("Routing to", () => {
     });
   });
 
-  describe("'/debug/tracez_v2/snapshot/:id' path", () => {
-    test("routes to <ScheduleDetails> component", () => {
-      navigateToPath("/debug/tracez_v2/snapshot/12345");
+  describe("'/debug/tracez_v2/node/:nodeID/snapshot/:snapshotID' path", () => {
+    test("routes to <SnapshotPage> component", () => {
+      navigateToPath("/debug/tracez_v2/node/1/snapshot/12345");
       screen.getByTestId("snapshotPage");
     });
   });

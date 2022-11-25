@@ -51,7 +51,7 @@ message BackupEncryptionOptions {
   // encryption or decryption when mode == KMS.
   KMSInfo kms_info  = 3 [(gogoproto.customname) = "KMSInfo"];
 
-  string raw_passphrae = 4;
+  string raw_passphrase = 4;
   repeated string raw_kms_uris = 5;
 }
 
@@ -86,11 +86,18 @@ message StreamIngestionDetails {
   // this span.
   roachpb.Span span = 2 [(gogoproto.nullable) = false];
   
-  reserved 5;
-  roachpb.TenantID tenant_id = 6 [(gogoproto.customname) = "TenantID", (gogoproto.nullable) = false];
-
   // Stream of tenant data will be ingested as a new tenant with 'new_tenant_id'.
-  roachpb.TenantID new_tenant_id = 7 [(gogoproto.customname) = "NewTenantID", (gogoproto.nullable) = false];
+  roachpb.TenantID destination_tenant_id = 7 [(gogoproto.customname) = "DestinationTenantID", (gogoproto.nullable) = false];
+
+  string source_tenant_name = 8 [
+    (gogoproto.nullable) = false,
+    (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/roachpb.TenantName"];
+
+  string destination_tenant_name = 9 [
+    (gogoproto.nullable) = false,
+    (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/roachpb.TenantName"];
+
+  reserved 5, 6;
 }
 
 message StreamIngestionCheckpoint {
@@ -141,6 +148,9 @@ message StreamReplicationDetails {
     (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/uuid.UUID",
     (gogoproto.nullable) = false
   ];
+
+  // TenantID is the ID of the source tenant being streamed.
+  roachpb.TenantID tenant_id = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "TenantID"];
 }
 
 message StreamReplicationProgress {
@@ -560,6 +570,13 @@ message NewSchemaChangeDetails {
   // be ongoing.
   repeated MergeProgress merge_progress = 6 [(gogoproto.nullable) = false];
 
+  // ProtectedTimestampRecord is the ID of the protected timestamp record
+  // corresponding to this job.
+  bytes protected_timestamp_record = 7 [
+    (gogoproto.customname) = "ProtectedTimestampRecord",
+    (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/uuid.UUID"
+  ];
+
   reserved 1, 2, 3, 5;
 }
 
@@ -759,6 +776,14 @@ message SchemaChangeDetails {
   // WriteTimestamp is the timestamp at which a backfill may want to write, e.g.
   // a time that has been identified via a scan as safe for writing.
   util.hlc.Timestamp write_timestamp = 10 [(gogoproto.nullable) = false];
+
+  // ProtectedTimestampRecord is the ID of the protected timestamp record
+  // corresponding to this job.
+  bytes protected_timestamp_record = 11 [
+    (gogoproto.customname) = "ProtectedTimestampRecord",
+    (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/uuid.UUID"
+  ];
+
 }
 
 message SchemaChangeProgress {
@@ -1026,8 +1051,8 @@ message RowLevelTTLProgress {
   // ProcessorProgresses is the progress per DistSQL processor.
   repeated RowLevelTTLProcessorProgress processor_progresses = 2 [(gogoproto.nullable)=false];
 
-  // UseDistSQL is true if the TTL job distributed the work to DistSQL processors (requires cluster v22.2).
-  bool use_dist_sql = 3 [(gogoproto.customname) = "UseDistSQL"];
+  // UseDistSQL is no longer used in v23.1+ as all TTL jobs are using DistSQL.
+  reserved 3;
 
   // JobSpanCount is the number of spans for the entire TTL job.
   int64 job_span_count = 4;

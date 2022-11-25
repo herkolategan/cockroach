@@ -17,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/repstream"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
@@ -380,6 +381,7 @@ func newInternalPlanner(
 
 	p.extendedEvalCtx = internalExtendedEvalCtx(ctx, sds, params.collection, txn, ts, ts, execCfg)
 	p.extendedEvalCtx.Planner = p
+	p.extendedEvalCtx.StreamManagerFactory = p
 	p.extendedEvalCtx.PrivilegedAccessor = p
 	p.extendedEvalCtx.SessionAccessor = p
 	p.extendedEvalCtx.ClientNoticeSender = p
@@ -827,4 +829,16 @@ func (p *planner) resetPlanner(
 	p.evalCatalogBuiltins.Init(p.execCfg.Codec, txn, p.Descriptors())
 	p.skipDescriptorCache = false
 	p.typeResolutionDbID = descpb.InvalidID
+}
+
+// GetReplicationStreamManager returns a ReplicationStreamManager.
+func (p *planner) GetReplicationStreamManager(
+	ctx context.Context,
+) (eval.ReplicationStreamManager, error) {
+	return repstream.GetReplicationStreamManager(ctx, p.EvalContext(), p.Txn())
+}
+
+// GetStreamIngestManager returns a StreamIngestManager.
+func (p *planner) GetStreamIngestManager(ctx context.Context) (eval.StreamIngestManager, error) {
+	return repstream.GetStreamIngestManager(ctx, p.EvalContext(), p.Txn())
 }

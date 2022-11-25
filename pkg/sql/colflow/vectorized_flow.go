@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
@@ -348,11 +349,6 @@ func (f *vectorizedFlow) GetPath(ctx context.Context) string {
 	return f.tempStorage.path
 }
 
-// IsVectorized is part of the flowinfra.Flow interface.
-func (f *vectorizedFlow) IsVectorized() bool {
-	return true
-}
-
 // ConcurrentTxnUse is part of the flowinfra.Flow interface. It is conservative
 // in that it returns that there is concurrent txn use as soon as any operator
 // concurrency is detected. This should be inconsequential for local flows that
@@ -371,20 +367,35 @@ func (f *vectorizedFlow) Release() {
 	vectorizedFlowPool.Put(f)
 }
 
+const (
+	vectorizedFlowOverhead        = int64(unsafe.Sizeof(vectorizedFlow{}))
+	vectorizedFlowCreatorOverhead = int64(unsafe.Sizeof(vectorizedFlowCreator{}))
+	fdCountingSemaphoreOverhead   = int64(unsafe.Sizeof(fdCountingSemaphore{}))
+)
+
+// MemUsage is part of the flowinfra.Flow interface.
+func (f *vectorizedFlow) MemUsage() int64 {
+	return f.FlowBase.MemUsage() + vectorizedFlowOverhead +
+		vectorizedFlowCreatorOverhead + fdCountingSemaphoreOverhead
+}
+
 // Cleanup is part of the flowinfra.Flow interface.
 func (f *vectorizedFlow) Cleanup(ctx context.Context) {
 	// This cleans up all the memory and disk monitoring of the vectorized flow.
 	f.creator.cleanup(ctx)
 
-	if buildutil.CrdbTestBuild && f.FlowBase.Started() {
-		// Check that all closers have been closed. Note that we don't check
-		// this in case the flow was never started in the first place (it is ok
-		// to not check this since closers haven't allocated any resources in
-		// such a case).
-		if numClosed := atomic.LoadInt32(f.testingInfo.numClosed); numClosed != f.testingInfo.numClosers {
-			colexecerror.InternalError(errors.AssertionFailedf("expected %d components to be closed, but found that only %d were", f.testingInfo.numClosers, numClosed))
-		}
-	}
+	// TODO(yuzefovich): uncomment this once the assertion is no longer flaky.
+	//if buildutil.CrdbTestBuild && f.FlowBase.Started() && !f.FlowCtx.EvalCtx.SessionData().TestingVectorizeInjectPanics {
+	//	// Check that all closers have been closed. Note that we don't check
+	//	// this in case the flow was never started in the first place (it is ok
+	//	// to not check this since closers haven't allocated any resources in
+	//	// such a case). We also don't check when the panic injection is
+	//	// enabled since then Close() might be legitimately not called (if a
+	//	// panic is injected in Init() of the wrapped operator).
+	//	if numClosed := atomic.LoadInt32(f.testingInfo.numClosed); numClosed != f.testingInfo.numClosers {
+	//		colexecerror.InternalError(errors.AssertionFailedf("expected %d components to be closed, but found that only %d were", f.testingInfo.numClosers, numClosed))
+	//	}
+	//}
 
 	f.tempStorage.Lock()
 	created := f.tempStorage.path != ""
@@ -471,11 +482,11 @@ func (s *vectorizedFlowCreator) makeGetStatsFnForOutbox(
 	flowCtx *execinfra.FlowCtx,
 	statsCollectors []colexecop.VectorizedStatsCollector,
 	originSQLInstanceID base.SQLInstanceID,
-) func() []*execinfrapb.ComponentStats {
+) func(context.Context) []*execinfrapb.ComponentStats {
 	if !s.recordingStats {
 		return nil
 	}
-	return func() []*execinfrapb.ComponentStats {
+	return func(ctx context.Context) []*execinfrapb.ComponentStats {
 		lastOutboxOnRemoteNode := atomic.AddInt32(&s.numOutboxesDrained, 1) == atomic.LoadInt32(&s.numOutboxes) && !s.isGatewayNode
 		numResults := len(statsCollectors)
 		if lastOutboxOnRemoteNode {
@@ -494,6 +505,7 @@ func (s *vectorizedFlowCreator) makeGetStatsFnForOutbox(
 				FlowStats: execinfrapb.FlowStats{
 					MaxMemUsage:  optional.MakeUint(uint64(flowCtx.Mon.MaximumBytes())),
 					MaxDiskUsage: optional.MakeUint(uint64(flowCtx.DiskMonitor.MaximumBytes())),
+					ConsumedRU:   optional.MakeUint(uint64(flowCtx.TenantCPUMonitor.EndCollection(ctx))),
 				},
 			})
 		}
@@ -537,7 +549,7 @@ type remoteComponentCreator interface {
 		allocator *colmem.Allocator,
 		input colexecargs.OpWithMetaInfo,
 		typs []*types.T,
-		getStats func() []*execinfrapb.ComponentStats,
+		getStats func(context.Context) []*execinfrapb.ComponentStats,
 	) (*colrpc.Outbox, error)
 	newInbox(
 		allocator *colmem.Allocator,
@@ -554,7 +566,7 @@ func (vectorizedRemoteComponentCreator) newOutbox(
 	allocator *colmem.Allocator,
 	input colexecargs.OpWithMetaInfo,
 	typs []*types.T,
-	getStats func() []*execinfrapb.ComponentStats,
+	getStats func(context.Context) []*execinfrapb.ComponentStats,
 ) (*colrpc.Outbox, error) {
 	return colrpc.NewOutbox(allocator, input, typs, getStats)
 }
@@ -625,7 +637,8 @@ type vectorizedFlowCreator struct {
 	fdSemaphore     semaphore.Semaphore
 
 	// numClosers and numClosed are used to assert during testing that the
-	// expected number of components are closed.
+	// expected number of components are closed. The assertion only happens if
+	// the panic injection is not enabled.
 	numClosers int32
 	numClosed  int32
 }
@@ -737,7 +750,7 @@ func (s *vectorizedFlowCreator) setupRemoteOutputStream(
 	outputTyps []*types.T,
 	stream *execinfrapb.StreamEndpointSpec,
 	factory coldata.ColumnFactory,
-	getStats func() []*execinfrapb.ComponentStats,
+	getStats func(context.Context) []*execinfrapb.ComponentStats,
 ) (execopnode.OpNode, error) {
 	outbox, err := s.remoteComponentCreator.newOutbox(
 		colmem.NewAllocator(ctx, s.monitorRegistry.NewStreamingMemAccount(flowCtx), factory),
@@ -1200,8 +1213,7 @@ func (s *vectorizedFlowCreator) setupFlow(
 			}
 			if flowCtx.EvalCtx.SessionData().TestingVectorizeInjectPanics {
 				result.Root = newPanicInjector(result.Root)
-			}
-			if buildutil.CrdbTestBuild {
+			} else if buildutil.CrdbTestBuild {
 				toCloseCopy := append(colexecop.Closers{}, result.ToClose...)
 				for i := range toCloseCopy {
 					func(idx int) {

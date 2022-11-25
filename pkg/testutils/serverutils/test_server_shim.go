@@ -170,9 +170,6 @@ type TestServerInterface interface {
 	// SQLLivenessProvider returns the sqlliveness.Provider as an interface{}.
 	SQLLivenessProvider() interface{}
 
-	// StartupMigrationsManager returns the *startupmigrations.Manager as an interface{}.
-	StartupMigrationsManager() interface{}
-
 	// NodeLiveness exposes the NodeLiveness instance used by the TestServer as an
 	// interface{}.
 	NodeLiveness() interface{}
@@ -421,7 +418,7 @@ func StartTenant(
 // starting a test Tenant. The returned tenant IDs match those built
 // into the test certificates.
 func TestTenantID() roachpb.TenantID {
-	return roachpb.MakeTenantID(security.EmbeddedTenantIDs()[0])
+	return roachpb.MustMakeTenantID(security.EmbeddedTenantIDs()[0])
 }
 
 // GetJSONProto uses the supplied client to GET the URL specified by the parameters

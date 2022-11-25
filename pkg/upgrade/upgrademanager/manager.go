@@ -21,8 +21,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/server/settingswatcher"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
@@ -53,7 +55,7 @@ type Manager struct {
 }
 
 // GetUpgrade returns the upgrade associated with this key.
-func (m *Manager) GetUpgrade(key clusterversion.ClusterVersion) (upgrade.Upgrade, bool) {
+func (m *Manager) GetUpgrade(key roachpb.Version) (upgrade.Upgrade, bool) {
 	if m.knobs.RegistryOverride != nil {
 		if m, ok := m.knobs.RegistryOverride(key); ok {
 			return m, ok
@@ -98,6 +100,54 @@ func NewManager(
 
 var _ upgrade.JobDeps = (*Manager)(nil)
 
+// safeToUpgradeTenant ensures that we don't allow for tenant upgrade if it's
+// not safe to do so. Safety is defined as preventing a secondary tenant's
+// cluster version from ever exceeding the host cluster version. It is always
+// safe to upgrade the system tenant.
+func safeToUpgradeTenant(
+	ctx context.Context,
+	codec keys.SQLCodec,
+	overrides cluster.OverridesInformer,
+	tenantClusterVersion clusterversion.ClusterVersion,
+) (bool, error) {
+	if codec.ForSystemTenant() {
+		// Unconditionally run upgrades for the system tenant.
+		return true, nil
+	}
+	// The overrides informer can be nil, but only in a system tenant.
+	if overrides == nil {
+		return false, errors.AssertionFailedf("overrides informer is nil in secondary tenant")
+	}
+	hostClusterVersion := overrides.(*settingswatcher.SettingsWatcher).GetStorageClusterVersion()
+	if hostClusterVersion.Less(tenantClusterVersion.Version) {
+		// We assert here if we find a tenant with a higher cluster version than
+		// the host cluster. It's dangerous to run in this mode because the
+		// tenant may expect upgrades to be present on the host cluster which
+		// haven't yet been run. It's also not clear how we could get into this
+		// state, since a tenant can't be created at a higher level
+		// than the host cluster, and will be prevented from upgrading beyond
+		// the host cluster version by the code below.
+		return false, errors.AssertionFailedf("tenant found at higher cluster version "+
+			"than host cluster: host cluster at version %v, tenant at version"+
+			" %v.", hostClusterVersion, tenantClusterVersion)
+	}
+	if tenantClusterVersion == hostClusterVersion {
+		// The cluster version of the tenant is equal to the cluster version of
+		// the host cluster. If we allow the upgrade it will push the tenant
+		// to a higher cluster version than the host cluster. Block the upgrade.
+		return false, errors.Newf("preventing tenant upgrade from running "+
+			"as the host cluster has not yet been upgraded: "+
+			"host cluster version = %v, tenant cluster version = %v",
+			hostClusterVersion, tenantClusterVersion)
+	}
+
+	// The cluster version of the tenant is less than that of the host
+	// cluster. It's safe to run the upgrade.
+	log.Infof(ctx, "safe to upgrade tenant: host cluster at version %v, tenant at version"+
+		" %v", hostClusterVersion, tenantClusterVersion)
+	return true, nil
+}
+
 // Migrate runs the set of upgrades required to upgrade the cluster version
 // from the current version to the target one.
 func (m *Manager) Migrate(
@@ -121,7 +171,12 @@ func (m *Manager) Migrate(
 		return nil
 	}
 
-	clusterVersions := m.listBetween(from, to)
+	// Determine whether it's safe to perform the upgrade for secondary tenants.
+	if safe, err := safeToUpgradeTenant(ctx, m.codec, m.settings.OverridesInformer, from); !safe {
+		return err
+	}
+
+	clusterVersions := m.listBetween(from.Version, to.Version)
 	log.Infof(ctx, "migrating cluster from %s to %s (stepping through %s)", from, to, clusterVersions)
 	if len(clusterVersions) == 0 {
 		return nil
@@ -132,7 +187,7 @@ func (m *Manager) Migrate(
 	// that might be doomed to fail.
 	{
 		finalVersion := clusterVersions[len(clusterVersions)-1]
-		if err := validateTargetClusterVersion(ctx, m.deps.Cluster, finalVersion); err != nil {
+		if err := validateTargetClusterVersion(ctx, m.deps.Cluster, clusterversion.ClusterVersion{Version: finalVersion}); err != nil {
 			return err
 		}
 	}
@@ -143,6 +198,7 @@ func (m *Manager) Migrate(
 
 	for _, clusterVersion := range clusterVersions {
 		log.Infof(ctx, "stepping through %s", clusterVersion)
+		cv := clusterversion.ClusterVersion{Version: clusterVersion}
 		// First, run the actual upgrade if any.
 		if err := m.runMigration(ctx, user, clusterVersion); err != nil {
 			return err
@@ -151,7 +207,7 @@ func (m *Manager) Migrate(
 		// Next we'll push out the version gate to every node in the cluster.
 		// Each node will persist the version, bump the local version gates, and
 		// then return. The upgrade associated with the specific version is
-		// executed before every node in the cluster has the corresponding
+		// executed before any node in the cluster has the corresponding
 		// version activated. Migrations that depend on a certain version
 		// already being activated will need to registered using a cluster
 		// version greater than it.
@@ -227,7 +283,7 @@ func (m *Manager) Migrate(
 			// can join the cluster will run a release that support the fence
 			// version, and by design also supports the actual version (which is
 			// the direct successor of the fence).
-			fenceVersion := upgrade.FenceVersionFor(ctx, clusterVersion)
+			fenceVersion := upgrade.FenceVersionFor(ctx, cv)
 			if err := bumpClusterVersion(ctx, m.deps.Cluster, fenceVersion); err != nil {
 				return err
 			}
@@ -235,18 +291,18 @@ func (m *Manager) Migrate(
 
 		// Now sanity check that we'll actually be able to perform the real
 		// cluster version bump, cluster-wide.
-		if err := validateTargetClusterVersion(ctx, m.deps.Cluster, clusterVersion); err != nil {
+		if err := validateTargetClusterVersion(ctx, m.deps.Cluster, cv); err != nil {
 			return err
 		}
 
 		// Finally, bump the real version cluster-wide.
-		err := bumpClusterVersion(ctx, m.deps.Cluster, clusterVersion)
+		err := bumpClusterVersion(ctx, m.deps.Cluster, cv)
 		if err != nil {
 			return err
 		}
 		// Bump up the cluster version for tenants, which
 		// will bump over individual version bumps.
-		err = updateSystemVersionSetting(ctx, clusterVersion)
+		err = updateSystemVersionSetting(ctx, cv)
 		if err != nil {
 			return err
 		}
@@ -297,7 +353,7 @@ func forEveryNodeUntilClusterStable(
 }
 
 func (m *Manager) runMigration(
-	ctx context.Context, user username.SQLUsername, version clusterversion.ClusterVersion,
+	ctx context.Context, user username.SQLUsername, version roachpb.Version,
 ) error {
 	mig, exists := m.GetUpgrade(version)
 	if !exists {
@@ -315,10 +371,7 @@ func (m *Manager) runMigration(
 }
 
 func (m *Manager) getOrCreateMigrationJob(
-	ctx context.Context,
-	user username.SQLUsername,
-	version clusterversion.ClusterVersion,
-	name string,
+	ctx context.Context, user username.SQLUsername, version roachpb.Version, name string,
 ) (alreadyCompleted bool, jobID jobspb.JobID, _ error) {
 	newJobID := m.jr.MakeJobID()
 	if err := m.deps.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
@@ -347,8 +400,11 @@ func (m *Manager) getOrCreateMigrationJob(
 }
 
 func (m *Manager) getRunningMigrationJob(
-	ctx context.Context, txn *kv.Txn, version clusterversion.ClusterVersion,
+	ctx context.Context, txn *kv.Txn, version roachpb.Version,
 ) (found bool, jobID jobspb.JobID, _ error) {
+	// Wrap the version into a ClusterVersion so that the JSON looks like what the
+	// Payload proto has inside.
+	cv := clusterversion.ClusterVersion{Version: version}
 	const query = `
 SELECT id, status
 	FROM (
@@ -363,7 +419,7 @@ SELECT id, status
   WHERE status IN ` + jobs.NonTerminalStatusTupleString + `
 	)
 	WHERE pl->'migration'->'clusterVersion' = $1::JSON;`
-	jsonMsg, err := protoreflect.MessageToJSON(&version, protoreflect.FmtFlags{EmitDefaults: false})
+	jsonMsg, err := protoreflect.MessageToJSON(&cv, protoreflect.FmtFlags{EmitDefaults: false})
 	if err != nil {
 		return false, 0, errors.Wrap(err, "failed to marshal version to JSON")
 	}
@@ -397,9 +453,7 @@ SELECT id, status
 	}
 }
 
-func (m *Manager) listBetween(
-	from clusterversion.ClusterVersion, to clusterversion.ClusterVersion,
-) []clusterversion.ClusterVersion {
+func (m *Manager) listBetween(from roachpb.Version, to roachpb.Version) []roachpb.Version {
 	if m.knobs.ListBetweenOverride != nil {
 		return m.knobs.ListBetweenOverride(from, to)
 	}
@@ -408,9 +462,7 @@ func (m *Manager) listBetween(
 
 // checkPreconditions runs the precondition check for each tenant upgrade
 // associated with the provided versions.
-func (m *Manager) checkPreconditions(
-	ctx context.Context, versions []clusterversion.ClusterVersion,
-) error {
+func (m *Manager) checkPreconditions(ctx context.Context, versions []roachpb.Version) error {
 	for _, v := range versions {
 		mig, ok := m.GetUpgrade(v)
 		if !ok {
@@ -420,7 +472,7 @@ func (m *Manager) checkPreconditions(
 		if !ok {
 			continue
 		}
-		if err := tm.Precondition(ctx, v, upgrade.TenantDeps{
+		if err := tm.Precondition(ctx, clusterversion.ClusterVersion{Version: v}, upgrade.TenantDeps{
 			DB:                      m.deps.DB,
 			Codec:                   m.codec,
 			Settings:                m.settings,

@@ -20,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
@@ -112,10 +113,11 @@ func ApplyTenantLicense() error {
 // IsEnterpriseEnabled() instead.
 //
 // The ClusterID argument should be the tenant-specific logical
-// cluster ID. is not used for the check itself; it is merely embedded
+// cluster ID.
+// `feature` is not used for the check itself; it is merely embedded
 // in the URL displayed in the error message.
-func CheckEnterpriseEnabled(st *cluster.Settings, cluster uuid.UUID, org, feature string) error {
-	return checkEnterpriseEnabledAt(st, timeutil.Now(), cluster, org, feature, true /* withDetails */)
+func CheckEnterpriseEnabled(st *cluster.Settings, cluster uuid.UUID, feature string) error {
+	return checkEnterpriseEnabledAt(st, timeutil.Now(), cluster, feature, true /* withDetails */)
 }
 
 // IsEnterpriseEnabled returns whether the requested enterprise feature is
@@ -124,11 +126,12 @@ func CheckEnterpriseEnabled(st *cluster.Settings, cluster uuid.UUID, org, featur
 // hot paths.
 //
 // The ClusterID argument should be the tenant-specific logical
-// cluster ID. is not used for the check itself; it is merely embedded
+// cluster ID.
+// `feature` is not used for the check itself; it is merely embedded
 // in the URL displayed in the error message.
-func IsEnterpriseEnabled(st *cluster.Settings, cluster uuid.UUID, org, feature string) bool {
+func IsEnterpriseEnabled(st *cluster.Settings, cluster uuid.UUID, feature string) bool {
 	return checkEnterpriseEnabledAt(
-		st, timeutil.Now(), cluster, org, feature, false /* withDetails */) == nil
+		st, timeutil.Now(), cluster, feature, false /* withDetails */) == nil
 }
 
 func init() {
@@ -184,7 +187,7 @@ func updateMetricWithLicenseTTL(
 }
 
 func checkEnterpriseEnabledAt(
-	st *cluster.Settings, at time.Time, cluster uuid.UUID, org, feature string, withDetails bool,
+	st *cluster.Settings, at time.Time, cluster uuid.UUID, feature string, withDetails bool,
 ) error {
 	if atomic.LoadInt32(&enterpriseStatus) == enterpriseEnabled {
 		return nil
@@ -193,6 +196,7 @@ func checkEnterpriseEnabledAt(
 	if err != nil {
 		return err
 	}
+	org := sql.ClusterOrganization.Get(&st.SV)
 	return check(license, at, cluster, org, feature, withDetails)
 }
 

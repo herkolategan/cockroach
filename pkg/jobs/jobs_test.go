@@ -18,9 +18,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime/pprof"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -623,6 +625,53 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.resumeCheckCh <- struct{}{}
 		rts.check(t, jobs.StatusRunning)
 
+		r, err := regexp.Compile("retry txn")
+		require.NoError(t, err)
+
+		executeWithRetriableTxn := func(db *gosql.DB, fn func(txn *gosql.Tx) error) error {
+			txn, err := db.Begin()
+			if err != nil {
+				return err
+			}
+			defer func() {
+				if err != nil {
+					_ = txn.Rollback()
+				}
+
+			}()
+
+			_, err = txn.Exec("SAVEPOINT cockroach_restart")
+			if err != nil {
+				return err
+			}
+
+			maxRetries := 10
+			retryCount := 0
+			for {
+				err = fn(txn)
+				if err == nil {
+					_, err = txn.Exec("RELEASE SAVEPOINT cockroach_restart")
+					if err == nil {
+						return txn.Commit()
+					}
+				}
+
+				if !r.MatchString(err.Error()) {
+					return err
+				}
+
+				_, rollbackErr := txn.Exec("ROLLBACK TO SAVEPOINT cockroach_restart")
+				if rollbackErr != nil {
+					return errors.CombineErrors(rollbackErr, err)
+				}
+
+				retryCount++
+				if retryCount > maxRetries {
+					return errors.Wrap(err, "retries exhausted")
+				}
+			}
+		}
+
 		// Rollback a CANCEL.
 		{
 			txn, err := rts.outerDB.Begin()
@@ -660,17 +709,16 @@ func TestRegistryLifecycle(t *testing.T) {
 		}
 		// Now pause it for reals.
 		{
-			txn, err := rts.outerDB.Begin()
+			err := executeWithRetriableTxn(rts.outerDB, func(txn *gosql.Tx) error {
+				if _, err := txn.Exec("PAUSE JOB $1", job.ID()); err != nil {
+					return err
+				}
+				// Not committed yet, so state shouldn't have changed.
+				// Don't check status in txn.
+				rts.check(t, "")
+				return nil
+			})
 			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := txn.Exec("PAUSE JOB $1", job.ID()); err != nil {
-				t.Fatal(err)
-			}
-			// Not committed yet, so state shouldn't have changed.
-			// Don't check status in txn.
-			rts.check(t, "")
-			if err := txn.Commit(); err != nil {
 				t.Fatal(err)
 			}
 			rts.check(t, jobs.StatusPaused)
@@ -691,17 +739,16 @@ func TestRegistryLifecycle(t *testing.T) {
 		}
 		// Commit a RESUME.
 		{
-			txn, err := rts.outerDB.Begin()
+			err := executeWithRetriableTxn(rts.outerDB, func(txn *gosql.Tx) error {
+				if _, err := txn.Exec("RESUME JOB $1", job.ID()); err != nil {
+					return err
+				}
+				// Not committed yet, so state shouldn't have changed.
+				// Don't check status in txn.
+				rts.check(t, "")
+				return nil
+			})
 			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := txn.Exec("RESUME JOB $1", job.ID()); err != nil {
-				t.Fatal(err)
-			}
-			// Not committed yet, so state shouldn't have changed.
-			// Don't check status in txn.
-			rts.check(t, "")
-			if err := txn.Commit(); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -1211,10 +1258,11 @@ func TestJobLifecycle(t *testing.T) {
 
 	done := make(chan struct{})
 	defer close(done)
-
+	resumeSignaler := newResumeStartedSignaler()
 	jobs.RegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 		return jobs.FakeResumer{
 			OnResume: func(ctx context.Context) error {
+				resumeSignaler.SignalResumeStarted()
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -1468,6 +1516,10 @@ func TestJobLifecycle(t *testing.T) {
 		if err := exp.verify(job.ID(), jobs.StatusRunning); err != nil {
 			t.Fatal(err)
 		}
+
+		// Wait for job to be adopted so that we have the
+		// lease and can move to succeeded.
+		resumeSignaler.WaitForResumeStarted()
 
 		// PauseRequested fails after job is successful.
 		if err := job.Succeeded(ctx); err != nil {
@@ -3109,6 +3161,35 @@ func checkBundle(t *testing.T, zipFile string, expectedFiles []string) {
 	require.Equal(t, expectedFiles, filesInZip)
 }
 
+type resumeStartedSignaler struct {
+	syncutil.Mutex
+	cond      *sync.Cond
+	isStarted bool
+}
+
+func newResumeStartedSignaler() *resumeStartedSignaler {
+	ret := &resumeStartedSignaler{}
+	ret.cond = sync.NewCond(&ret.Mutex)
+	return ret
+
+}
+
+func (r *resumeStartedSignaler) SignalResumeStarted() {
+	r.Lock()
+	r.isStarted = true
+	r.cond.Signal()
+	r.Unlock()
+}
+
+func (r *resumeStartedSignaler) WaitForResumeStarted() {
+	r.Lock()
+	for !r.isStarted {
+		r.cond.Wait()
+	}
+	r.isStarted = false
+	r.Unlock()
+}
+
 // TestPauseReason tests pausing a job with a user specified reason.
 func TestPauseReason(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -3125,10 +3206,11 @@ func TestPauseReason(t *testing.T) {
 
 	done := make(chan struct{})
 	defer close(done)
-
+	resumeSignaler := newResumeStartedSignaler()
 	jobs.RegisterConstructor(jobspb.TypeImport, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
 		return jobs.FakeResumer{
 			OnResume: func(ctx context.Context) error {
+				resumeSignaler.SignalResumeStarted()
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -3160,9 +3242,16 @@ func TestPauseReason(t *testing.T) {
 		return n
 	}
 	mustNotHaveClaim := func() {
-		require.Equal(t, 0, countRowsWithClaimInfo())
+		t.Helper()
+		testutils.SucceedsSoon(t, func() error {
+			if countRowsWithClaimInfo() == 0 {
+				return nil
+			}
+			return errors.New("still waiting for claim to clear")
+		})
 	}
 	mustHaveClaim := func() {
+		t.Helper()
 		testutils.SucceedsSoon(t, func() error {
 			if countRowsWithClaimInfo() == 1 {
 				return nil
@@ -3175,6 +3264,7 @@ func TestPauseReason(t *testing.T) {
 	q := fmt.Sprintf("SELECT status FROM system.jobs WHERE id = %d", jobID)
 	tdb.CheckQueryResultsRetry(t, q, [][]string{{"running"}})
 	mustHaveClaim()
+	resumeSignaler.WaitForResumeStarted()
 
 	getStatusAndPayload := func(t *testing.T, id jobspb.JobID) (string, jobspb.Payload) {
 		var payloadBytes []byte
@@ -3208,6 +3298,7 @@ func TestPauseReason(t *testing.T) {
 
 		checkStatusAndPauseReason(t, jobID, "running", "for testing")
 		mustHaveClaim()
+		resumeSignaler.WaitForResumeStarted()
 	}
 	{
 		// Pause the job again with a different reason. Verify that the job is paused with the reason.

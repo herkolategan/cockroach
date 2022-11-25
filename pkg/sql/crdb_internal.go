@@ -1865,7 +1865,8 @@ CREATE TABLE crdb_internal.%s (
   distributed      BOOL,           -- whether the query is running distributed
   phase            STRING,         -- the current execution phase
   full_scan        BOOL,           -- whether the query contains a full table or index scan
-  plan_gist        STRING          -- Compressed logical plan.
+  plan_gist        STRING,         -- Compressed logical plan.
+  database         STRING          -- the database the statement was executed on
 )`
 
 func (p *planner) makeSessionsRequest(
@@ -2016,6 +2017,7 @@ func populateQueriesTable(
 				tree.NewDString(phase),
 				isFullScanDatum,
 				planGistDatum,
+				tree.NewDString(query.Database),
 			); err != nil {
 				return err
 			}
@@ -2041,6 +2043,7 @@ func populateQueriesTable(
 				tree.DNull,                             // phase
 				tree.DNull,                             // full_scan
 				tree.DNull,                             // plan_gist
+				tree.DNull,                             // database
 			); err != nil {
 				return err
 			}
@@ -6668,7 +6671,7 @@ func populateExecutionInsights(
 		contentionEvents := tree.DNull
 		if len(insight.Statement.ContentionEvents) > 0 {
 			var contentionEventsJSON json.JSON
-			contentionEventsJSON, err = sqlstatsutil.BuildContentionEventsJSON(insight.Statement.ContentionEvents)
+			contentionEventsJSON, err = convertContentionEventsToJSON(ctx, p, insight.Statement.ContentionEvents)
 			if err != nil {
 				return err
 			}
@@ -6717,4 +6720,63 @@ func populateExecutionInsights(
 		}
 	}
 	return
+}
+
+func convertContentionEventsToJSON(
+	ctx context.Context, p *planner, contentionEvents []roachpb.ContentionEvent,
+) (json json.JSON, err error) {
+
+	eventWithNames := make([]sqlstatsutil.ContentionEventWithNames, len(contentionEvents))
+	for i, contentionEvent := range contentionEvents {
+		_, tableID, err := p.ExecCfg().Codec.DecodeTablePrefix(contentionEvent.Key)
+		if err != nil {
+			return nil, err
+		}
+		_, _, indexID, err := p.ExecCfg().Codec.DecodeIndexPrefix(contentionEvent.Key)
+		if err != nil {
+			return nil, err
+		}
+
+		flags := tree.ObjectLookupFlags{CommonLookupFlags: tree.CommonLookupFlags{
+			Required: true,
+		}}
+
+		desc := p.Descriptors()
+		var tableDesc catalog.TableDescriptor
+		tableDesc, err = desc.GetImmutableTableByID(ctx, p.txn, descpb.ID(tableID), flags)
+		if err != nil {
+			return nil, err
+		}
+
+		idxDesc, err := tableDesc.FindIndexWithID(descpb.IndexID(indexID))
+		if err != nil {
+			return nil, err
+		}
+
+		ok, dbDesc, err := desc.GetImmutableDatabaseByID(ctx, p.txn, tableDesc.GetParentID(), tree.DatabaseLookupFlags{})
+		if err != nil || !ok {
+			return nil, err
+		}
+
+		schemaDesc, err := desc.GetImmutableSchemaByID(ctx, p.txn, tableDesc.GetParentSchemaID(), tree.SchemaLookupFlags{})
+		if err != nil {
+			return nil, err
+		}
+
+		var idxName string
+		if idxDesc != nil {
+			idxName = idxDesc.GetName()
+		}
+
+		eventWithNames[i] = sqlstatsutil.ContentionEventWithNames{
+			BlockingTransactionID: contentionEvent.TxnMeta.ID.String(),
+			SchemaName:            schemaDesc.GetName(),
+			DatabaseName:          dbDesc.GetName(),
+			TableName:             tableDesc.GetName(),
+			IndexName:             idxName,
+			DurationInMs:          float64(contentionEvent.Duration) / float64(time.Millisecond),
+		}
+	}
+
+	return sqlstatsutil.BuildContentionEventsJSON(eventWithNames)
 }

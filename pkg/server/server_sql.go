@@ -28,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/featureflag"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
+	"github.com/cockroachdb/cockroach/pkg/jobs/jobsprotectedts"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/bulk"
@@ -153,7 +154,6 @@ type SQLServer struct {
 	sessionRegistry        *sql.SessionRegistry
 	closedSessionCache     *sql.ClosedSessionCache
 	jobRegistry            *jobs.Registry
-	startupMigrationsMgr   *startupmigrations.Manager
 	statsRefresher         *stats.Refresher
 	temporaryObjectCleaner *sql.TemporaryObjectCleaner
 	internalMemMetrics     sql.MemoryMetrics
@@ -496,14 +496,15 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 			return nil, errors.AssertionFailedf("non-system codec used for SQL pod")
 		}
 
-		cfg.sqlInstanceStorage = instancestorage.NewStorage(cfg.db, codec, cfg.sqlLivenessProvider)
+		cfg.sqlInstanceStorage = instancestorage.NewStorage(
+			cfg.db, codec, cfg.sqlLivenessProvider.CachedReader(), cfg.Settings)
 		cfg.sqlInstanceReader = instancestorage.NewReader(
 			cfg.sqlInstanceStorage,
 			cfg.sqlLivenessProvider.CachedReader(),
 			cfg.rangeFeedFactory,
 			codec, cfg.clock, cfg.stopper)
 
-		// In a multi-tenant environment, use the sqlInstanceProvider to resolve
+		// In a multi-tenant environment, use the sqlInstanceReader to resolve
 		// SQL pod addresses.
 		addressResolver := func(nodeID roachpb.NodeID) (net.Addr, error) {
 			info, err := cfg.sqlInstanceReader.GetInstance(cfg.rpcContext.MasterCtx, base.SQLInstanceID(nodeID))
@@ -537,6 +538,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 			cfg.clock,
 			cfg.db,
 			cfg.circularInternalExecutor,
+			cfg.internalExecutorFactory,
 			cfg.rpcContext.LogicalClusterID,
 			cfg.nodeIDContainer,
 			cfg.sqlLivenessProvider,
@@ -739,6 +741,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 		SQLSQLResponseAdmissionQ: cfg.sqlSQLResponseAdmissionQ,
 		CollectionFactory:        collectionFactory,
 		ExternalIORecorder:       cfg.costController,
+		TenantCostController:     cfg.costController,
 		RangeStatsFetcher:        rangeStatsFetcher,
 	}
 	cfg.TempStorageConfig.Mon.SetMetrics(distSQLMetrics.CurDiskBytesCount, distSQLMetrics.MaxDiskBytesHist)
@@ -1037,13 +1040,19 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 	jobRegistry.SetInternalExecutorFactory(ieFactory)
 	execCfg.IndexBackfiller = sql.NewIndexBackfiller(execCfg)
 	execCfg.IndexMerger = sql.NewIndexBackfillerMergePlanner(execCfg)
+	execCfg.ProtectedTimestampManager = jobsprotectedts.NewManager(
+		execCfg.DB,
+		execCfg.Codec,
+		execCfg.ProtectedTimestampProvider,
+		execCfg.SystemConfig,
+		execCfg.JobRegistry,
+	)
 	execCfg.Validator = scdeps.NewValidator(
 		execCfg.DB,
 		execCfg.Codec,
 		execCfg.Settings,
 		ieFactory,
-		execCfg.ProtectedTimestampProvider,
-		execCfg.SystemConfig,
+		execCfg.ProtectedTimestampManager,
 		sql.ValidateForwardIndexes,
 		sql.ValidateInvertedIndexes,
 		sql.ValidateCheckConstraint,
@@ -1317,7 +1326,13 @@ func (s *SQLServer) preStart(
 		if err != nil {
 			return err
 		}
-		// Allocate our instance ID.
+		// Start instance ID reclaim loop.
+		if err := s.sqlInstanceStorage.RunInstanceIDReclaimLoop(
+			ctx, stopper, timeutil.DefaultTimeSource{}, session.Expiration,
+		); err != nil {
+			return err
+		}
+		// Acquire our instance ID.
 		instanceID, err := s.sqlInstanceStorage.CreateInstance(
 			ctx, session.ID(), session.Expiration(), s.cfg.AdvertiseAddr, s.distSQLServer.Locality)
 		if err != nil {
@@ -1398,7 +1413,6 @@ func (s *SQLServer) preStart(
 		s.execCfg.Settings,
 		s.jobRegistry,
 	)
-	s.startupMigrationsMgr = startupMigrationsMgr // only for testing via TestServer
 
 	if err := s.jobRegistry.Start(ctx, stopper); err != nil {
 		return err

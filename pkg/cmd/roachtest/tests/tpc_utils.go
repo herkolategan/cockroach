@@ -29,6 +29,9 @@ import (
 // compatible dataset exists (compatible is defined as a tpch dataset with a
 // scale factor at least as large as the provided scale factor), performing an
 // expensive dataset restore only if it doesn't.
+//
+// The function disables auto stats collection and ensures that table statistics
+// are present for all TPCH tables.
 func loadTPCHDataset(
 	ctx context.Context,
 	t test.Test,
@@ -38,7 +41,20 @@ func loadTPCHDataset(
 	m cluster.Monitor,
 	roachNodes option.NodeListOption,
 	disableMergeQueue bool,
-) error {
+) (retErr error) {
+	_, err := db.Exec("SET CLUSTER SETTING sql.stats.automatic_collection.enabled = false;")
+	if retErr != nil {
+		return err
+	}
+	defer func() {
+		if retErr == nil {
+			if _, err = db.Exec("USE tpch"); err != nil {
+				retErr = err
+			} else {
+				createStatsFromTables(t, db, tpchTables)
+			}
+		}
+	}()
 	if disableMergeQueue {
 		if _, err := db.Exec("SET CLUSTER SETTING kv.range_merge.queue_enabled = false;"); err != nil {
 			t.Fatal(err)
@@ -81,12 +97,18 @@ func loadTPCHDataset(
 	}
 
 	t.L().Printf("restoring tpch scale factor %d\n", sf)
+	// Lower the target size for the restore spans so that we get more ranges.
+	// This is useful to exercise the parallelism across ranges within a single
+	// query.
+	if _, err := db.ExecContext(ctx, "SET CLUSTER SETTING backup.restore_span.target_size = '64MiB';"); err != nil {
+		return err
+	}
 	tpchURL := fmt.Sprintf("gs://cockroach-fixtures/workload/tpch/scalefactor=%d/backup?AUTH=implicit", sf)
 	if _, err := db.ExecContext(ctx, `CREATE DATABASE IF NOT EXISTS tpch;`); err != nil {
 		return err
 	}
 	query := fmt.Sprintf(`RESTORE tpch.* FROM '%s' WITH into_db = 'tpch';`, tpchURL)
-	_, err := db.ExecContext(ctx, query)
+	_, err = db.ExecContext(ctx, query)
 	return err
 }
 

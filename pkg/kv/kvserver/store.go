@@ -41,6 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/idalloc"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/intentresolver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvadmission"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/multiqueue"
@@ -218,11 +219,11 @@ var leaseTransferWait = func() *settings.DurationSetting {
 const leaseTransferWaitSettingName = "server.shutdown.lease_transfer_wait"
 
 // ExportRequestsLimit is the number of Export requests that can run at once.
-// Each extracts data from RocksDB to a temp file and then uploads it to cloud
-// storage. In order to not exhaust the disk or memory, or saturate the network,
+// Each extracts data from Pebble to an in-memory SST and returns it to the
+// caller. In order to not exhaust the disk or memory, or saturate the network,
 // limit the number of these that can be run in parallel. This number was chosen
 // by a guessing - it could be improved by more measured heuristics. Exported
-// here since we check it in in the caller to limit generated requests as well
+// here since we check it in the caller to limit generated requests as well
 // to prevent excessive queuing.
 var ExportRequestsLimit = settings.RegisterIntSetting(
 	settings.TenantWritable,
@@ -1219,10 +1220,14 @@ func NewStore(
 		ioThresholds: &iot,
 	}
 	s.ioThreshold.t = &admissionpb.IOThreshold{}
+	var allocatorStorePool storepool.AllocatorStorePool
+	if cfg.StorePool != nil {
+		allocatorStorePool = cfg.StorePool
+	}
 	if cfg.RPCContext != nil {
-		s.allocator = allocatorimpl.MakeAllocator(cfg.StorePool, cfg.RPCContext.RemoteClocks.Latency, cfg.TestingKnobs.AllocatorKnobs)
+		s.allocator = allocatorimpl.MakeAllocator(cfg.Settings, allocatorStorePool, cfg.RPCContext.RemoteClocks.Latency, cfg.TestingKnobs.AllocatorKnobs)
 	} else {
-		s.allocator = allocatorimpl.MakeAllocator(cfg.StorePool, func(string) (time.Duration, bool) {
+		s.allocator = allocatorimpl.MakeAllocator(cfg.Settings, allocatorStorePool, func(string) (time.Duration, bool) {
 			return 0, false
 		}, cfg.TestingKnobs.AllocatorKnobs)
 	}
@@ -1292,7 +1297,7 @@ func NewStore(
 		s.renewableLeasesSignal = make(chan struct{}, 1)
 	}
 
-	s.limiters.BulkIOWriteRate = rate.NewLimiter(rate.Limit(bulkIOWriteLimit.Get(&cfg.Settings.SV)), bulkIOWriteBurst)
+	s.limiters.BulkIOWriteRate = rate.NewLimiter(rate.Limit(bulkIOWriteLimit.Get(&cfg.Settings.SV)), kvserverbase.BulkIOWriteBurst)
 	bulkIOWriteLimit.SetOnChange(&cfg.Settings.SV, func(ctx context.Context) {
 		s.limiters.BulkIOWriteRate.SetLimit(rate.Limit(bulkIOWriteLimit.Get(&cfg.Settings.SV)))
 	})

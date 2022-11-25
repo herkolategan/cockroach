@@ -17,6 +17,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/logstore"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/readsummary"
@@ -124,7 +125,7 @@ func entries(
 	reader storage.Reader,
 	rangeID roachpb.RangeID,
 	eCache *raftentry.Cache,
-	sideloaded SideloadStorage,
+	sideloaded logstore.SideloadStorage,
 	lo, hi, maxBytes uint64,
 ) ([]raftpb.Entry, error) {
 	if lo > hi {
@@ -160,10 +161,10 @@ func entries(
 		}
 		expectedIndex++
 
-		if sniffSideloadedRaftCommand(ent.Data) {
+		if logstore.SniffSideloadedRaftCommand(ent.Data) {
 			canCache = canCache && sideloaded != nil
 			if sideloaded != nil {
-				newEnt, err := maybeInlineSideloadedRaftCommand(
+				newEnt, err := logstore.MaybeInlineSideloadedRaftCommand(
 					ctx, rangeID, ent, sideloaded, eCache,
 				)
 				if err != nil {
@@ -486,18 +487,11 @@ func (r *Replica) GetSnapshot(
 	// Delegate to a static function to make sure that we do not depend
 	// on any indirect calls to r.store.Engine() (or other in-memory
 	// state of the Replica). Everything must come from the snapshot.
-	withSideloaded := func(fn func(SideloadStorage) error) error {
-		r.raftMu.Lock()
-		defer r.raftMu.Unlock()
-		return fn(r.raftMu.sideloaded)
-	}
+	//
 	// NB: We have Replica.mu read-locked, but we need it write-locked in order
 	// to use Replica.mu.stateLoader. This call is not performance sensitive, so
 	// create a new state loader.
-	snapData, err := snapshot(
-		ctx, snapUUID, stateloader.Make(rangeID), snapType,
-		snap, rangeID, r.store.raftEntryCache, withSideloaded, startKey,
-	)
+	snapData, err := snapshot(ctx, snapUUID, stateloader.Make(rangeID), snapType, snap, startKey)
 	if err != nil {
 		log.Errorf(ctx, "error generating snapshot: %+v", err)
 		return nil, err
@@ -516,15 +510,9 @@ type OutgoingSnapshot struct {
 	// The Pebble snapshot that will be streamed from.
 	EngineSnap storage.Reader
 	// The replica state within the snapshot.
-	State kvserverpb.ReplicaState
-	// Allows access the original Replica's sideloaded storage. Note that
-	// this isn't a snapshot of the sideloaded storage congruent with EngineSnap
-	// or RaftSnap -- a log truncation could have removed files from the
-	// sideloaded storage in the meantime.
-	WithSideloaded func(func(SideloadStorage) error) error
-	RaftEntryCache *raftentry.Cache
-	snapType       kvserverpb.SnapshotRequest_Type
-	onClose        func()
+	State    kvserverpb.ReplicaState
+	snapType kvserverpb.SnapshotRequest_Type
+	onClose  func()
 }
 
 func (s OutgoingSnapshot) String() string {
@@ -577,9 +565,6 @@ func snapshot(
 	rsl stateloader.StateLoader,
 	snapType kvserverpb.SnapshotRequest_Type,
 	snap storage.Reader,
-	rangeID roachpb.RangeID,
-	eCache *raftentry.Cache,
-	withSideloaded func(func(SideloadStorage) error) error,
 	startKey roachpb.RKey,
 ) (OutgoingSnapshot, error) {
 	var desc roachpb.RangeDescriptor
@@ -601,11 +586,9 @@ func snapshot(
 	}
 
 	return OutgoingSnapshot{
-		RaftEntryCache: eCache,
-		WithSideloaded: withSideloaded,
-		EngineSnap:     snap,
-		State:          state,
-		SnapUUID:       snapUUID,
+		EngineSnap: snap,
+		State:      state,
+		SnapUUID:   snapUUID,
 		RaftSnap: raftpb.Snapshot{
 			Data: snapUUID.GetBytes(),
 			Metadata: raftpb.SnapshotMetadata{
@@ -617,84 +600,6 @@ func snapshot(
 		},
 		snapType: snapType,
 	}, nil
-}
-
-// append the given entries to the raft log. Takes the previous values of
-// r.mu.lastIndex, r.mu.lastTerm, and r.mu.raftLogSize, and returns new values.
-// We do this rather than modifying them directly because these modifications
-// need to be atomic with the commit of the batch. This method requires that
-// r.raftMu is held.
-//
-// append is intentionally oblivious to the existence of sideloaded proposals.
-// They are managed by the caller, including cleaning up obsolete on-disk
-// payloads in case the log tail is replaced.
-//
-// NOTE: This method takes a engine.Writer because reads are unnecessary when
-// prevLastIndex is 0 and prevLastTerm is invalidLastTerm. In the case where
-// reading is necessary (I.E. entries are getting overwritten or deleted), a
-// engine.ReadWriter must be passed in.
-func (r *Replica) append(
-	ctx context.Context,
-	writer storage.Writer,
-	prevLastIndex uint64,
-	prevLastTerm uint64,
-	prevRaftLogSize int64,
-	entries []raftpb.Entry,
-) (uint64, uint64, int64, error) {
-	if len(entries) == 0 {
-		return prevLastIndex, prevLastTerm, prevRaftLogSize, nil
-	}
-	prefix := r.raftMu.stateLoader.RaftLogPrefix()
-	var diff enginepb.MVCCStats
-	var value roachpb.Value
-	for i := range entries {
-		ent := &entries[i]
-		key := keys.RaftLogKeyFromPrefix(prefix, ent.Index)
-
-		if err := value.SetProto(ent); err != nil {
-			return 0, 0, 0, err
-		}
-		value.InitChecksum(key)
-		var err error
-		if ent.Index > prevLastIndex {
-			err = storage.MVCCBlindPut(ctx, writer, &diff, key, hlc.Timestamp{}, hlc.ClockTimestamp{}, value, nil /* txn */)
-		} else {
-			// We type assert `writer` to also be an engine.ReadWriter only in
-			// the case where we're replacing existing entries.
-			eng, ok := writer.(storage.ReadWriter)
-			if !ok {
-				panic("expected writer to be a engine.ReadWriter when overwriting log entries")
-			}
-			err = storage.MVCCPut(ctx, eng, &diff, key, hlc.Timestamp{}, hlc.ClockTimestamp{}, value, nil /* txn */)
-		}
-		if err != nil {
-			return 0, 0, 0, err
-		}
-	}
-
-	lastIndex := entries[len(entries)-1].Index
-	lastTerm := entries[len(entries)-1].Term
-	// Delete any previously appended log entries which never committed.
-	if prevLastIndex > 0 {
-		// We type assert `writer` to also be an engine.ReadWriter only in the
-		// case where we're deleting existing entries.
-		eng, ok := writer.(storage.ReadWriter)
-		if !ok {
-			panic("expected writer to be a engine.ReadWriter when deleting log entries")
-		}
-		for i := lastIndex + 1; i <= prevLastIndex; i++ {
-			// Note that the caller is in charge of deleting any sideloaded payloads
-			// (which they must only do *after* the batch has committed).
-			_, err := storage.MVCCDelete(ctx, eng, &diff, keys.RaftLogKeyFromPrefix(prefix, i),
-				hlc.Timestamp{}, hlc.ClockTimestamp{}, nil)
-			if err != nil {
-				return 0, 0, 0, err
-			}
-		}
-	}
-
-	raftLogSize := prevRaftLogSize + diff.SysBytes
-	return lastIndex, lastTerm, raftLogSize, nil
 }
 
 // updateRangeInfo is called whenever a range is updated by ApplySnapshot

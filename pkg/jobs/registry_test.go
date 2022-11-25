@@ -311,6 +311,7 @@ func TestBatchJobsCreation(t *testing.T) {
 
 				ctx := context.Background()
 				s, sqlDB, kvDB := serverutils.StartServer(t, args)
+				ief := s.InternalExecutorFactory().(sqlutil.InternalExecutorFactory)
 				tdb := sqlutils.MakeSQLRunner(sqlDB)
 				defer s.Stopper().Stop(ctx)
 				r := s.JobRegistry().(*Registry)
@@ -334,9 +335,9 @@ func TestBatchJobsCreation(t *testing.T) {
 				}
 				// Create jobs in a batch.
 				var jobIDs []jobspb.JobID
-				require.NoError(t, kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+				require.NoError(t, ief.TxnWithExecutor(ctx, kvDB, nil /* sessionData */, func(ctx context.Context, txn *kv.Txn, ie sqlutil.InternalExecutor) error {
 					var err error
-					jobIDs, err = r.CreateJobsWithTxn(ctx, txn, records)
+					jobIDs, err = r.CreateJobsWithTxn(ctx, txn, ie, records)
 					return err
 				}))
 				require.Equal(t, len(jobIDs), test.batchSize)
@@ -941,6 +942,8 @@ func TestRunWithoutLoop(t *testing.T) {
 		Settings: settings,
 	})
 
+	ief := s.InternalExecutorFactory().(sqlutil.InternalExecutorFactory)
+
 	defer s.Stopper().Stop(ctx)
 	r := s.JobRegistry().(*Registry)
 	var records []*Record
@@ -955,10 +958,8 @@ func TestRunWithoutLoop(t *testing.T) {
 		})
 	}
 	var jobIDs []jobspb.JobID
-	require.NoError(t, kvDB.Txn(ctx, func(
-		ctx context.Context, txn *kv.Txn,
-	) (err error) {
-		jobIDs, err = r.CreateJobsWithTxn(ctx, txn, records)
+	require.NoError(t, ief.TxnWithExecutor(ctx, kvDB, nil /* sessionData */, func(ctx context.Context, txn *kv.Txn, ie sqlutil.InternalExecutor) (err error) {
+		jobIDs, err = r.CreateJobsWithTxn(ctx, txn, ie, records)
 		return err
 	}))
 	require.EqualError(t, r.Run(
@@ -972,6 +973,7 @@ func TestRunWithoutLoop(t *testing.T) {
 
 func TestJobIdleness(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 	intervalOverride := time.Millisecond
@@ -1110,6 +1112,7 @@ func TestJobIdleness(t *testing.T) {
 // allow other job registries in the cluster to claim and run this job.
 func TestDisablingJobAdoptionClearsClaimSessionID(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
 	intervalOverride := time.Millisecond
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{

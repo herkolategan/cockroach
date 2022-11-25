@@ -36,22 +36,28 @@ import (
 )
 
 const (
-	// leaseRebalanceThreshold is the minimum ratio of a store's lease surplus
-	// to the mean range/lease count that permits lease-transfers away from that
-	// store.
-	leaseRebalanceThreshold = 0.05
-
-	// baseLoadBasedLeaseRebalanceThreshold is the equivalent of
-	// leaseRebalanceThreshold for load-based lease rebalance decisions (i.e.
-	// "follow-the-workload"). It's the base threshold for decisions that get
-	// adjusted based on the load and latency of the involved ranges/nodes.
-	baseLoadBasedLeaseRebalanceThreshold = 2 * leaseRebalanceThreshold
-
 	// minReplicaWeight sets a floor for how low a replica weight can be. This is
 	// needed because a weight of zero doesn't work in the current lease scoring
 	// algorithm.
 	minReplicaWeight = 0.001
 )
+
+// LeaseRebalanceThreshold is the minimum ratio of a store's lease surplus
+// to the mean range/lease count that permits lease-transfers away from that
+// store.
+// Made configurable for the sake of testing.
+var LeaseRebalanceThreshold = 0.05
+
+// LeaseRebalanceThresholdMin is the absolute number of leases above/below the
+// mean lease count that a store can have before considered overfull/underfull.
+// Made configurable for the sake of testing.
+var LeaseRebalanceThresholdMin = 5.0
+
+// baseLoadBasedLeaseRebalanceThreshold is the equivalent of
+// LeaseRebalanceThreshold for load-based lease rebalance decisions (i.e.
+// "follow-the-workload"). It's the base threshold for decisions that get
+// adjusted based on the load and latency of the involved ranges/nodes.
+var baseLoadBasedLeaseRebalanceThreshold = 2 * LeaseRebalanceThreshold
 
 // MinLeaseTransferStatsDuration configures the minimum amount of time a
 // replica must wait for stats about request counts to accumulate before
@@ -60,10 +66,10 @@ const (
 // Made configurable for the sake of testing.
 var MinLeaseTransferStatsDuration = 30 * time.Second
 
-// enableLoadBasedLeaseRebalancing controls whether lease rebalancing is done
+// EnableLoadBasedLeaseRebalancing controls whether lease rebalancing is done
 // via the new heuristic based on request load and latency or via the simpler
 // approach that purely seeks to balance the number of leases per node evenly.
-var enableLoadBasedLeaseRebalancing = settings.RegisterBoolSetting(
+var EnableLoadBasedLeaseRebalancing = settings.RegisterBoolSetting(
 	settings.SystemOnly,
 	"kv.allocator.load_based_lease_rebalancing.enabled",
 	"set to enable rebalancing of range leases based on load and latency",
@@ -400,6 +406,13 @@ var (
 		Measurement: "Attempts",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaLBLeaseTransferFollowTheWorkload = metric.Metadata{
+		Name: "kv.allocator.load_based_lease_transfers.follow_the_workload",
+		Help: "The number times the allocator determined that the lease should be" +
+			" transferred to another replica for locality.",
+		Measurement: "Attempts",
+		Unit:        metric.Unit_COUNT,
+	}
 
 	// Load-based replica rebalances.
 	metaLBReplicaRebalancingCannotFindBetterCandidate = metric.Metadata{
@@ -444,6 +457,7 @@ type loadBasedLeaseTransferMetrics struct {
 	DeltaNotSignificant          *metric.Counter
 	MissingStatsForExistingStore *metric.Counter
 	ShouldTransfer               *metric.Counter
+	FollowTheWorkload            *metric.Counter
 }
 
 type loadBasedReplicaRebalanceMetrics struct {
@@ -463,7 +477,8 @@ type AllocatorMetrics struct {
 // Allocator tries to spread replicas as evenly as possible across the stores
 // in the cluster.
 type Allocator struct {
-	StorePool     *storepool.StorePool
+	st            *cluster.Settings
+	StorePool     storepool.AllocatorStorePool
 	nodeLatencyFn func(addr string) (time.Duration, bool)
 	// TODO(aayush): Let's replace this with a *rand.Rand that has a rand.Source
 	// wrapped inside a mutex, to avoid misuse.
@@ -481,6 +496,7 @@ func makeAllocatorMetrics() AllocatorMetrics {
 			DeltaNotSignificant:          metric.NewCounter(metaLBLeaseTransferDeltaNotSignificant),
 			MissingStatsForExistingStore: metric.NewCounter(metaLBLeaseTransferMissingStatsForExistingStore),
 			ShouldTransfer:               metric.NewCounter(metaLBLeaseTransferShouldTransfer),
+			FollowTheWorkload:            metric.NewCounter(metaLBLeaseTransferFollowTheWorkload),
 		},
 		LoadBasedReplicaRebalanceMetrics: loadBasedReplicaRebalanceMetrics{
 			CannotFindBetterCandidate:    metric.NewCounter(metaLBReplicaRebalancingCannotFindBetterCandidate),
@@ -494,7 +510,8 @@ func makeAllocatorMetrics() AllocatorMetrics {
 
 // MakeAllocator creates a new allocator using the specified StorePool.
 func MakeAllocator(
-	storePool *storepool.StorePool,
+	st *cluster.Settings,
+	storePool storepool.AllocatorStorePool,
 	nodeLatencyFn func(addr string) (time.Duration, bool),
 	knobs *allocator.TestingKnobs,
 ) Allocator {
@@ -502,12 +519,14 @@ func MakeAllocator(
 	// There are number of test cases that make a test store but don't add
 	// gossip or a store pool. So we can't rely on the existence of the
 	// store pool in those cases.
-	if storePool != nil && storePool.Deterministic {
+	if storePool != nil && storePool.IsDeterministic() {
 		randSource = rand.NewSource(777)
 	} else {
+
 		randSource = rand.NewSource(rand.Int63())
 	}
 	allocator := Allocator{
+		st:            st,
 		StorePool:     storePool,
 		nodeLatencyFn: nodeLatencyFn,
 		randGen:       makeAllocatorRand(randSource),
@@ -916,7 +935,7 @@ func (a *Allocator) allocateTarget(
 	// as possible, and therefore any store that is good enough will be
 	// considered.
 	var selector CandidateSelector
-	if replicaStatus == Alive || recoveryStoreSelector.Get(&a.StorePool.St.SV) == "best" {
+	if replicaStatus == Alive || recoveryStoreSelector.Get(&a.st.SV) == "best" {
 		selector = a.NewBestCandidateSelector()
 	} else {
 		selector = a.NewGoodCandidateSelector()
@@ -1500,8 +1519,8 @@ func (a Allocator) RebalanceNonVoter(
 func (a *Allocator) ScorerOptions(ctx context.Context) *RangeCountScorerOptions {
 	return &RangeCountScorerOptions{
 		StoreHealthOptions:      a.StoreHealthOptions(ctx),
-		deterministic:           a.StorePool.Deterministic,
-		rangeRebalanceThreshold: RangeRebalanceThreshold.Get(&a.StorePool.St.SV),
+		deterministic:           a.StorePool.IsDeterministic(),
+		rangeRebalanceThreshold: RangeRebalanceThreshold.Get(&a.st.SV),
 	}
 }
 
@@ -1510,7 +1529,7 @@ func (a *Allocator) ScorerOptionsForScatter(ctx context.Context) *ScatterScorerO
 	return &ScatterScorerOptions{
 		RangeCountScorerOptions: RangeCountScorerOptions{
 			StoreHealthOptions:      a.StoreHealthOptions(ctx),
-			deterministic:           a.StorePool.Deterministic,
+			deterministic:           a.StorePool.IsDeterministic(),
 			rangeRebalanceThreshold: 0,
 		},
 		// We set jitter to be equal to the padding around replica-count rebalancing
@@ -1519,7 +1538,7 @@ func (a *Allocator) ScorerOptionsForScatter(ctx context.Context) *ScatterScorerO
 		// made by the replicateQueue during normal course of operations. In other
 		// words, we don't want stores that are too far away from the mean to be
 		// affected by the jitter.
-		jitter: RangeRebalanceThreshold.Get(&a.StorePool.St.SV),
+		jitter: RangeRebalanceThreshold.Get(&a.st.SV),
 	}
 }
 
@@ -1676,10 +1695,10 @@ func (a *Allocator) leaseholderShouldMoveDueToPreferences(
 // storeHealthLogOnly. By default storeHealthBlockRebalanceTo is the action taken. When
 // there is a mixed version cluster, storeHealthNoAction is set instead.
 func (a *Allocator) StoreHealthOptions(_ context.Context) StoreHealthOptions {
-	enforcementLevel := StoreHealthEnforcement(l0SublevelsThresholdEnforce.Get(&a.StorePool.St.SV))
+	enforcementLevel := StoreHealthEnforcement(l0SublevelsThresholdEnforce.Get(&a.st.SV))
 	return StoreHealthOptions{
 		EnforcementLevel:    enforcementLevel,
-		L0SublevelThreshold: l0SublevelsThreshold.Get(&a.StorePool.St.SV),
+		L0SublevelThreshold: l0SublevelsThreshold.Get(&a.st.SV),
 	}
 }
 
@@ -1769,6 +1788,11 @@ func (a *Allocator) TransferLeaseTarget(
 			}
 		}
 		if repl != (roachpb.ReplicaDescriptor{}) {
+			// We found a lease transfer candidate, using follow the workload.
+			// Update the respective metric and return the replica.
+			// NB: shouldTransferLeaseForAccessLocality will never return the
+			// current leaseholder as a target.
+			a.Metrics.LoadBasedLeaseTransferMetrics.FollowTheWorkload.Inc(1)
 			return repl
 		}
 		// Fall back to logic that doesn't take request counts and latency into
@@ -1841,10 +1865,9 @@ func (a *Allocator) TransferLeaseTarget(
 			candidates,
 			storeDescMap,
 			&QPSScorerOptions{
-				StoreHealthOptions:                a.StoreHealthOptions(ctx),
-				DeprecatedRangeRebalanceThreshold: RangeRebalanceThreshold.Get(&a.StorePool.St.SV),
-				QPSRebalanceThreshold:             allocator.QPSRebalanceThreshold.Get(&a.StorePool.St.SV),
-				MinRequiredQPSDiff:                allocator.MinQPSDifferenceForTransfers.Get(&a.StorePool.St.SV),
+				StoreHealthOptions:    a.StoreHealthOptions(ctx),
+				QPSRebalanceThreshold: allocator.QPSRebalanceThreshold.Get(&a.st.SV),
+				MinRequiredQPSDiff:    allocator.MinQPSDifferenceForTransfers.Get(&a.st.SV),
 			},
 		)
 
@@ -2047,7 +2070,7 @@ func (a Allocator) shouldTransferLeaseForAccessLocality(
 	// stats and locality information to base our decision on.
 	if statSummary == nil ||
 		statSummary.LocalityCounts == nil ||
-		!enableLoadBasedLeaseRebalancing.Get(&a.StorePool.St.SV) {
+		!EnableLoadBasedLeaseRebalancing.Get(&a.st.SV) {
 		return decideWithoutStats, roachpb.ReplicaDescriptor{}
 	}
 	replicaLocalities := a.StorePool.GetLocalitiesByNode(existing)
@@ -2109,7 +2132,7 @@ func (a Allocator) shouldTransferLeaseForAccessLocality(
 		if !ok {
 			continue
 		}
-		addr, err := a.StorePool.Gossip.GetNodeIDAddress(repl.NodeID)
+		addr, err := a.StorePool.GossipNodeIDAddress(repl.NodeID)
 		if err != nil {
 			log.KvDistribution.Errorf(ctx, "missing address for n%d: %+v", repl.NodeID, err)
 			continue
@@ -2121,7 +2144,7 @@ func (a Allocator) shouldTransferLeaseForAccessLocality(
 
 		remoteWeight := math.Max(minReplicaWeight, replicaWeights[repl.NodeID])
 		replScore, rebalanceAdjustment := loadBasedLeaseRebalanceScore(
-			ctx, a.StorePool.St, remoteWeight, remoteLatency, storeDesc, sourceWeight, source, candidateLeasesMean)
+			ctx, a.st, remoteWeight, remoteLatency, storeDesc, sourceWeight, source, candidateLeasesMean)
 		if replScore > bestReplScore {
 			bestReplScore = replScore
 			bestRepl = repl
@@ -2236,9 +2259,9 @@ func (a Allocator) shouldTransferLeaseForLeaseCountConvergence(
 	// but it's certainly a blunt instrument that could undo what we want.
 
 	// Allow lease transfer if we're above the overfull threshold, which is
-	// mean*(1+leaseRebalanceThreshold).
-	overfullLeaseThreshold := int32(math.Ceil(sl.CandidateLeases.Mean * (1 + leaseRebalanceThreshold)))
-	minOverfullThreshold := int32(math.Ceil(sl.CandidateLeases.Mean + 5))
+	// mean*(1+LeaseRebalanceThreshold).
+	overfullLeaseThreshold := int32(math.Ceil(sl.CandidateLeases.Mean * (1 + LeaseRebalanceThreshold)))
+	minOverfullThreshold := int32(math.Ceil(sl.CandidateLeases.Mean + LeaseRebalanceThresholdMin))
 	if overfullLeaseThreshold < minOverfullThreshold {
 		overfullLeaseThreshold = minOverfullThreshold
 	}
@@ -2247,8 +2270,8 @@ func (a Allocator) shouldTransferLeaseForLeaseCountConvergence(
 	}
 
 	if float64(source.Capacity.LeaseCount) > sl.CandidateLeases.Mean {
-		underfullLeaseThreshold := int32(math.Ceil(sl.CandidateLeases.Mean * (1 - leaseRebalanceThreshold)))
-		minUnderfullThreshold := int32(math.Ceil(sl.CandidateLeases.Mean - 5))
+		underfullLeaseThreshold := int32(math.Ceil(sl.CandidateLeases.Mean * (1 - LeaseRebalanceThreshold)))
+		minUnderfullThreshold := int32(math.Ceil(sl.CandidateLeases.Mean - LeaseRebalanceThresholdMin))
 		if underfullLeaseThreshold > minUnderfullThreshold {
 			underfullLeaseThreshold = minUnderfullThreshold
 		}
