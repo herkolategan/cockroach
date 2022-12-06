@@ -88,7 +88,7 @@ func makeRoachprodBenchCmd(runE func(cmd *cobra.Command, args []string) error) *
 	roachprodBenchCmd.Flags().String(clusterFlag, "", "the name of the cluster (must be set)")
 	roachprodBenchCmd.Flags().String(buildHashFlag, "", "override the build hash for the build output")
 	roachprodBenchCmd.Flags().Bool(raceFlag, false, "run tests using race builds")
-	roachprodBenchCmd.Flags().Bool(compressFlag, false, "compress the output of the benchmarks binaries")
+	roachprodBenchCmd.Flags().Bool(compressFlag, true, "compress the output of the benchmarks binaries")
 	roachprodBenchCmd.Flags().Int(batchSizeFlag, 128, "the number of packages to build per batch")
 	roachprodBenchCmd.Flags().String(crossFlag, "crosslinux", "the cross build target to use")
 	return roachprodBenchCmd
