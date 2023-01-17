@@ -4,7 +4,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "cluster",
     srcs = ["execute.go"],
-    importpath = "github.com/cockroachdb/cockroach/pkg/cmd/roachprod-bench/cluster",
+    importpath = "github.com/cockroachdb/cockroach/pkg/cmd/roachprod-microbench/cluster",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/roachprod",

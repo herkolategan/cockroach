@@ -4,7 +4,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "google",
     srcs = ["service.go"],
-    importpath = "github.com/cockroachdb/cockroach/pkg/cmd/roachprod-bench/google",
+    importpath = "github.com/cockroachdb/cockroach/pkg/cmd/roachprod-microbench/google",
     visibility = ["//visibility:public"],
     deps = [
         "@com_github_cockroachdb_errors//:errors",

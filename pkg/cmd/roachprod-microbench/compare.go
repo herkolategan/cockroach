@@ -15,7 +15,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod-bench/google"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod-microbench/google"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 	"golang.org/x/perf/benchstat"
@@ -52,7 +52,9 @@ func compareBenchmarks(
 				errorsFound = true
 			}
 			if results[0] == nil || results[1] == nil {
+				resultMutex.Lock()
 				delete(packageResults, basePackage)
+				resultMutex.Unlock()
 			}
 		}(pkg)
 	}
@@ -66,8 +68,8 @@ func compareBenchmarks(
 		var c benchstat.Collection
 		c.Alpha = 0.05
 		c.Order = benchstat.Reverse(benchstat.ByDelta)
-		c.AddResults("new", results[0])
-		c.AddResults("old", results[1])
+		c.AddResults("old", results[0])
+		c.AddResults("new", results[1])
 		tables := c.Tables()
 		tableResults[pkgGroup] = tables
 	}

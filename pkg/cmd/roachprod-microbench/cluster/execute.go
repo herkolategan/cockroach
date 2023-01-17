@@ -52,7 +52,7 @@ func remoteWorker(
 		var stdout, stderr string
 		if len(runResult) > 0 {
 			stdout = runResult[0].Stdout
-			stderr = runResult[1].Stderr
+			stderr = runResult[0].Stderr
 			err = errors.CombineErrors(err, runResult[0].Err)
 		}
 		response <- RemoteResponse{command, stdout, stderr, err, duration}

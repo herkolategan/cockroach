@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod-bench/cluster"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod-microbench/cluster"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 )
 
@@ -41,8 +41,18 @@ func initLogger(path string) {
 }
 
 func getReportLogName(name string, pkg string) string {
-	pkgFormatted := strings.ReplaceAll(pkg, "/", "-")
+	pkgFormatted := strings.ReplaceAll(pkg, "/", "_")
 	return fmt.Sprintf("%s-%s.log", pkgFormatted, name)
+}
+
+func getPackageFromReportLogName(name string) string {
+	pkg := strings.ReplaceAll(name, "_", "/")
+	pkg = strings.TrimSuffix(pkg, "-"+reportLogName+".log")
+	return pkg
+}
+
+func isReportLog(name string) bool {
+	return strings.HasSuffix(name, reportLogName+".log")
 }
 
 func createReports(packages []string) error {
@@ -50,11 +60,11 @@ func createReports(packages []string) error {
 	analyticsOutput = make(map[string]*os.File)
 	var err error
 	for _, pkg := range packages {
-		benchmarkOutput[pkg], err = os.Create(filepath.Join(logOutputDir, getReportLogName(reportLogName, pkg)))
+		benchmarkOutput[pkg], err = os.Create(filepath.Join(workingDir, getReportLogName(reportLogName, pkg)))
 		if err != nil {
 			return err
 		}
-		analyticsOutput[pkg], err = os.Create(filepath.Join(logOutputDir, getReportLogName(analyticsLogName, pkg)))
+		analyticsOutput[pkg], err = os.Create(filepath.Join(workingDir, getReportLogName(analyticsLogName, pkg)))
 		if err != nil {
 			return err
 		}
@@ -82,25 +92,8 @@ func writeBenchmarkErrorLogs(response cluster.RemoteResponse, index int) error {
 	stdoutLogName := fmt.Sprintf("%s-%d-stdout.log", benchmarkResponse.name, index)
 	stderrLogName := fmt.Sprintf("%s-%d-stderr.log", benchmarkResponse.name, index)
 	l.Printf("Writing error logs for benchmark at %s, %s\n", stdoutLogName, stderrLogName)
-	stdoutFile, err := os.Create(filepath.Join(logOutputDir, stdoutLogName))
-	if err != nil {
-		return err
-	}
-	stderrFile, err := os.Create(filepath.Join(logOutputDir, stderrLogName))
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := stdoutFile.Close(); closeErr != nil {
-			l.Errorf("Error closing stdout file: %s", closeErr)
-		}
-		if closeErr := stderrFile.Close(); closeErr != nil {
-			l.Errorf("Error closing stderr file: %s", closeErr)
-		}
-	}()
 
-	_, err = stdoutFile.WriteString(response.Stdout)
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(workingDir, stdoutLogName), []byte(response.Stdout), 0644); err != nil {
 		return err
 	}
 
@@ -110,10 +103,10 @@ func writeBenchmarkErrorLogs(response cluster.RemoteResponse, index int) error {
 		buffer.WriteString(fmt.Sprintf("Remote error: %s\n", response.Err))
 	}
 	buffer.WriteString(response.Stderr)
-	_, err = stderrFile.WriteString(buffer.String())
-	if err != nil {
+
+	if err := os.WriteFile(filepath.Join(workingDir, stderrLogName), []byte(buffer.String()), 0644); err != nil {
 		return err
 	}
 
-	return err
+	return nil
 }

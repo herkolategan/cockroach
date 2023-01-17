@@ -32,7 +32,7 @@ func initGCS() error {
 	return err
 }
 
-func createWriter(path string) (io.Writer, error) {
+func createWriter(path string) (io.WriteCloser, error) {
 	if strings.HasPrefix(path, "gs://") {
 		return createGCSWriter(path)
 	} else {
@@ -40,7 +40,7 @@ func createWriter(path string) (io.Writer, error) {
 	}
 }
 
-func createGCSWriter(path string) (io.Writer, error) {
+func createGCSWriter(path string) (io.WriteCloser, error) {
 	if client == nil {
 		if err := initGCS(); err != nil {
 			return nil, err
@@ -61,7 +61,7 @@ func parseGCSPath(path string) (*storage.BucketHandle, string, error) {
 	return client.Bucket(parts[2]), parts[3], nil
 }
 
-func createReader(path string) (io.Reader, error) {
+func createReader(path string) (io.ReadCloser, error) {
 	if strings.HasPrefix(path, "gs://") {
 		return createGCSReader(path)
 	} else {
@@ -69,7 +69,7 @@ func createReader(path string) (io.Reader, error) {
 	}
 }
 
-func createGCSReader(path string) (io.Reader, error) {
+func createGCSReader(path string) (io.ReadCloser, error) {
 	if client == nil {
 		if err := initGCS(); err != nil {
 			return nil, err
@@ -93,7 +93,7 @@ func joinPath(elem ...string) string {
 	return filepath.Join(elem...)
 }
 
-func publishDirectory(localSrcDir string, dstDir string) error {
+func publishDirectory(localSrcDir, dstDir string) error {
 	files, readErr := os.ReadDir(localSrcDir)
 	if readErr != nil {
 		return readErr
@@ -120,12 +120,12 @@ func publishDirectory(localSrcDir string, dstDir string) error {
 				l.Errorf("Failed to copy %s - %v", path.Name(), cErr)
 				errorsFound = true
 			}
-			cErr = writer.(io.Closer).Close()
+			cErr = writer.Close()
 			if cErr != nil {
 				l.Errorf("Failed to close writer for %s - %v", path.Name(), cErr)
 				errorsFound = true
 			}
-			cErr = reader.(io.Closer).Close()
+			cErr = reader.Close()
 			if cErr != nil {
 				l.Errorf("Failed to close reader for %s - %v", path.Name(), cErr)
 				errorsFound = true
