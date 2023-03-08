@@ -75,6 +75,7 @@ type Connector struct {
 	rpcDialTimeout  time.Duration // for testing
 	rpcDial         *singleflight.Group
 	defaultZoneCfg  *zonepb.ZoneConfig
+	internalClient  rpc.RestrictedInternalClient
 	addrs           []string
 
 	mu struct {
@@ -94,6 +95,38 @@ type Connector struct {
 		// notifyCh receives an event when there are changes to overrides.
 		notifyCh chan struct{}
 	}
+}
+
+type DetourClient struct {
+	kvpb.InternalClient
+	detour rpc.RestrictedInternalClient
+}
+
+func (d *DetourClient) Batch(
+	ctx context.Context, in *kvpb.BatchRequest, opts ...grpc.CallOption,
+) (*kvpb.BatchResponse, error) {
+	return d.detour.Batch(ctx, in, opts...)
+}
+
+func (d *DetourClient) RangeFeed(
+	ctx context.Context, in *kvpb.RangeFeedRequest, opts ...grpc.CallOption,
+) (kvpb.Internal_RangeFeedClient, error) {
+	return d.detour.RangeFeed(ctx, in, opts...)
+}
+
+func (d *DetourClient) MuxRangeFeed(
+	ctx context.Context, opts ...grpc.CallOption,
+) (kvpb.Internal_MuxRangeFeedClient, error) {
+	return d.detour.MuxRangeFeed(ctx, opts...)
+}
+
+func makeDetourClient(
+	internalClient kvpb.InternalClient, detour rpc.RestrictedInternalClient,
+) kvpb.InternalClient {
+	if detour == nil {
+		return internalClient
+	}
+	return &DetourClient{InternalClient: internalClient, detour: detour}
 }
 
 // client represents an RPC client that proxies to a KV instance.
@@ -149,6 +182,8 @@ func NewConnector(cfg kvtenant.ConnectorConfig, addrs []string) *Connector {
 	if cfg.TenantID.IsSystem() {
 		panic("TenantID not set")
 	}
+	rpcContext := cfg.RPCContext
+	internalClient := rpcContext.GetLocalInternalClientForAddr(rpcContext.NodeID.Get())
 	c := &Connector{
 		tenantID:        cfg.TenantID,
 		AmbientContext:  cfg.AmbientCtx,
@@ -157,6 +192,7 @@ func NewConnector(cfg kvtenant.ConnectorConfig, addrs []string) *Connector {
 		rpcRetryOptions: cfg.RPCRetryOptions,
 		defaultZoneCfg:  cfg.DefaultZoneConfig,
 		addrs:           addrs,
+		internalClient:  internalClient,
 	}
 
 	c.mu.nodeDescs = make(map[roachpb.NodeID]*roachpb.NodeDescriptor)
@@ -787,7 +823,7 @@ func (c *Connector) dialAddrs(ctx context.Context) (*client, error) {
 				continue
 			}
 			return &client{
-				InternalClient:   kvpb.NewInternalClient(conn),
+				InternalClient:   makeDetourClient(kvpb.NewInternalClient(conn), c.internalClient),
 				StatusClient:     serverpb.NewStatusClient(conn),
 				AdminClient:      serverpb.NewAdminClient(conn),
 				TimeSeriesClient: tspb.NewTimeSeriesClient(conn),
