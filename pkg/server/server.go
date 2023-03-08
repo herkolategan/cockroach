@@ -1431,7 +1431,7 @@ func (s *Server) PreStart(ctx context.Context) error {
 	s.loopbackPgL = loopbackPgL
 
 	// Tell the RPC context how to connect in-memory.
-	s.rpcContext.SetLoopbackDialer(rpcLoopbackDialFn)
+	rpc.RegisterLoopbackDialer(s.cfg.AdvertiseAddr, rpcLoopbackDialFn, s.stopper)
 
 	if s.cfg.TestingKnobs.Server != nil {
 		knobs := s.cfg.TestingKnobs.Server.(*TestingKnobs)

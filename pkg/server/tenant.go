@@ -488,7 +488,7 @@ func (s *SQLServerWrapper) PreStart(ctx context.Context) error {
 	s.loopbackPgL = loopbackPgL
 
 	// Tell the RPC context how to connect in-memory.
-	s.rpcContext.SetLoopbackDialer(rpcLoopbackDialFn)
+	rpc.RegisterLoopbackDialer(s.sqlServer.cfg.AdvertiseAddr, rpcLoopbackDialFn, s.stopper)
 
 	// NB: This is where (*Server).PreStart() reports the listener readiness
 	// via testing knobs: PauseAfterGettingRPCAddress, SignalAfterGettingRPCAddress.

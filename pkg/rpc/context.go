@@ -395,43 +395,74 @@ type Context struct {
 
 	logClosingConnEvery log.EveryN
 
-	// loopbackDialFn, when non-nil, is used when the target of the dial
-	// is ourselves (== AdvertiseAddr).
-	//
-	// This special case is not merely a performance optimization: it
-	// ensures that we are always able to self-dial. Reasons that could
-	// block a self-dial, and have been seen in the wild, include:
-	//
-	// - DNS is not ready so AdvertiseAddr does not resolve.
-	// - firewall rule only allows other machines to connect to our
-	//   listen/external address, not ourselves.
-	// - TCP port shortage on the local interface.
-	//
-	// The loopback listener is guaranteed to never talk to the OS'
-	// TCP stack and thus always avoids any TCP-related shortcoming.
-	//
-	// Note that this mechanism is separate (and fully independent) from
-	// the one used to provide the RestrictedInternalClient interface
-	// via DialInternalClient(). RestrictedInternalClient is an
-	// optimization for the "hot path" of KV batch requests, that takes
-	// many shortcuts through our abstraction stack to provide direct Go
-	// function calls for API functions, without the overhead of data
-	// serialization/deserialization.
-	//
-	// At this stage, we only plan to use this optimization for the
-	// small set of RPC endpoints it was designed for. The "common case"
-	// remains the regular gRPC protocol using ser/deser over a link.
-	// The loopbackDialFn fits under that common case by transporting
-	// the gRPC protocol over an in-memory pipe.
-	loopbackDialFn func(context.Context) (net.Conn, error)
-
 	// clientCreds is used to pass additional headers to called RPCs.
 	clientCreds credentials.PerRPCCredentials
 }
 
-// SetLoopbackDialer configures the loopback dialer function.
-func (c *Context) SetLoopbackDialer(loopbackDialFn func(context.Context) (net.Conn, error)) {
-	c.loopbackDialFn = loopbackDialFn
+// TODO(herko): update comment
+// loopbackDialFn, when non-nil, is used when the target of the dial
+// is ourselves (== AdvertiseAddr).
+//
+// This special case is not merely a performance optimization: it
+// ensures that we are always able to self-dial. Reasons that could
+// block a self-dial, and have been seen in the wild, include:
+//
+//   - DNS is not ready so AdvertiseAddr does not resolve.
+//   - firewall rule only allows other machines to connect to our
+//     listen/external address, not ourselves.
+//   - TCP port shortage on the local interface.
+//
+// The loopback listener is guaranteed to never talk to the OS'
+// TCP stack and thus always avoids any TCP-related shortcoming.
+//
+// Note that this mechanism is separate (and fully independent) from
+// the one used to provide the RestrictedInternalClient interface
+// via DialInternalClient(). RestrictedInternalClient is an
+// optimization for the "hot path" of KV batch requests, that takes
+// many shortcuts through our abstraction stack to provide direct Go
+// function calls for API functions, without the overhead of data
+// serialization/deserialization.
+//
+// At this stage, we only plan to use this optimization for the
+// small set of RPC endpoints it was designed for. The "common case"
+// remains the regular gRPC protocol using ser/deser over a link.
+// The loopbackDialFn fits under that common case by transporting
+// the gRPC protocol over an in-memory pipe.
+type (
+	LoopbackDialerFn func(context.Context) (net.Conn, error)
+	LoopbackDialer   struct {
+		LoopbackDialerFn LoopbackDialerFn
+		Address          string
+	}
+)
+
+var loopbackDialers = struct {
+	syncutil.RWMutex
+	registry map[string]*LoopbackDialer
+}{
+	registry: make(map[string]*LoopbackDialer),
+}
+
+func RegisterLoopbackDialer(address string, loopbackDialerFn LoopbackDialerFn, stopper *stop.Stopper) {
+	defer loopbackDialers.Unlock()
+	loopbackDialers.Lock()
+	loopbackDialers.registry[address] = &LoopbackDialer{
+		LoopbackDialerFn: loopbackDialerFn,
+		Address:          address,
+	}
+	go func() {
+		<-stopper.ShouldQuiesce()
+		defer loopbackDialers.Unlock()
+		loopbackDialers.Lock()
+		delete(loopbackDialers.registry, address)
+	}()
+}
+
+func getLoopbackDialer(address string) *LoopbackDialer {
+	defer loopbackDialers.RUnlock()
+	loopbackDialers.RLock()
+	dialer := loopbackDialers.registry[address]
+	return dialer
 }
 
 // connKey is used as key in the Context.conns map.
@@ -655,10 +686,10 @@ func NewContext(ctx context.Context, opts ContextOptions) *Context {
 	if opts.Knobs.NoLoopbackDialer {
 		// The test has decided it doesn't need/want a loopback dialer.
 		// Ensure we still have a working dial function in that case.
-		rpcCtx.loopbackDialFn = func(ctx context.Context) (net.Conn, error) {
+		RegisterLoopbackDialer(opts.Config.AdvertiseAddr, func(ctx context.Context) (net.Conn, error) {
 			d := onlyOnceDialer{}
 			return d.dial(ctx, opts.Config.AdvertiseAddr)
-		}
+		}, rpcCtx.Stopper)
 	}
 
 	// We only monitor remote clocks in server-to-server connections.
@@ -1612,8 +1643,8 @@ func (rpcCtx *Context) dialOptsLocal() ([]grpc.DialOption, error) {
 	}
 
 	dialOpts = append(dialOpts, grpc.WithContextDialer(
-		func(ctx context.Context, _ string) (net.Conn, error) {
-			return rpcCtx.loopbackDialFn(ctx)
+		func(ctx context.Context, address string) (net.Conn, error) {
+			return getLoopbackDialer(address).LoopbackDialerFn(ctx)
 		}))
 
 	return dialOpts, err
@@ -2080,7 +2111,8 @@ func (rpcCtx *Context) grpcDialRaw(
 	ctx context.Context, target string, class ConnectionClass,
 ) (*grpc.ClientConn, error) {
 	transport := tcpTransport
-	if rpcCtx.Config.AdvertiseAddr == target && !rpcCtx.ClientOnly {
+	if getLoopbackDialer(target) != nil && !rpcCtx.ClientOnly {
+		// TODO(herko): fix comment
 		// See the explanation on loopbackDialFn for an explanation about this.
 		transport = loopbackTransport
 	}
