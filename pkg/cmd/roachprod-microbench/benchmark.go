@@ -116,7 +116,7 @@ func listBenchmarks(
 			remoteBinDir := fmt.Sprintf("%s/%d/%s/bin", remoteDir, binIndex, pkg)
 			command := cluster.RemoteCommand{
 				Args: []string{"sh", "-c",
-					fmt.Sprintf(`"[ ! -d %s ] || (cd %s && ./run.sh -test.list=^Benchmark*)"`,
+					fmt.Sprintf(`"[ ! -d %s ] || (cd %s && ./run.sh -test.list=^Test*)"`,
 						remoteBinDir, remoteBinDir)},
 				Metadata: pkg,
 			}
@@ -126,7 +126,7 @@ func listBenchmarks(
 
 	// Execute commands for listing benchmarks.
 	l.Printf("Distributing and running benchmark listings across cluster %s", *flagCluster)
-	isValidBenchmarkName := regexp.MustCompile(`^Benchmark[a-zA-Z0-9_]+$`).MatchString
+	isValidBenchmarkName := regexp.MustCompile(`^Test[a-zA-Z0-9_]+$`).MatchString
 	errorCount := 0
 	benchmarkCounts := make(map[benchmark]int)
 	cluster.ExecuteRemoteCommands(log, *flagCluster, commands, numNodes, true, func(response cluster.RemoteResponse) {
@@ -241,7 +241,7 @@ func executeBenchmarks(binaries, packages []string) error {
 	// Generate commands for running benchmarks.
 	commands := make([][]cluster.RemoteCommand, 0)
 	for _, bench := range benchmarks {
-		runCommand := fmt.Sprintf("./run.sh %s -test.benchmem -test.bench=^%s$ -test.run=^$",
+		runCommand := fmt.Sprintf("./run.sh %s -test.run=^%s$",
 			strings.Join(testArgs, " "), bench.name)
 		if *flagTimeout != "" {
 			runCommand = fmt.Sprintf("timeout %s %s", *flagTimeout, runCommand)
@@ -275,16 +275,17 @@ func executeBenchmarks(binaries, packages []string) error {
 
 	// Execute commands.
 	errorCount := 0
-	logIndex := 0
+	//logIndex := 0
 	missingBenchmarks := make(map[benchmark]int, 0)
 	l.Printf("Found %d benchmarks, distributing and running benchmarks for %d iteration(s) across cluster %s",
 		len(benchmarks), *flagIterations, *flagCluster)
 	cluster.ExecuteRemoteCommands(muteLogger, *flagCluster, commands, numNodes, !*flagLenient, func(response cluster.RemoteResponse) {
 		fmt.Print(".")
-		benchmarkResults, containsErrors := extractBenchmarkResults(response.Stdout)
+		//benchmarkResults, containsErrors := extractBenchmarkResults(response.Stdout)
+		fmt.Println(response)
 		benchmarkResponse := response.Metadata.(benchmarkIndexed)
 		report := reporters[benchmarkResponse.index]
-		for _, benchmarkResult := range benchmarkResults {
+		/*for _, benchmarkResult := range benchmarkResults {
 			if _, writeErr := report.benchmarkOutput[benchmarkResponse.pkg].WriteString(
 				fmt.Sprintf("%s\n", strings.Join(benchmarkResult, " "))); writeErr != nil {
 				l.Errorf("Failed to write benchmark result to file - %v", writeErr)
@@ -298,15 +299,15 @@ func executeBenchmarks(binaries, packages []string) error {
 			}
 			errorCount++
 			logIndex++
-		}
+		}*/
 		if _, writeErr := report.analyticsOutput[benchmarkResponse.pkg].WriteString(
 			fmt.Sprintf("%s %d ms\n", benchmarkResponse.name,
 				response.Duration.Milliseconds())); writeErr != nil {
 			l.Errorf("Failed to write analytics to file - %v", writeErr)
 		}
-		if len(benchmarkResults) == 0 {
+		/*if len(benchmarkResults) == 0 {
 			missingBenchmarks[benchmarkResponse.benchmark]++
-		}
+		}*/
 	})
 
 	fmt.Println()

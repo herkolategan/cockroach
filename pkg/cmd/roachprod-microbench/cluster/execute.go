@@ -91,8 +91,10 @@ func ExecuteRemoteCommands(
 
 	ctx, cancelCtx := context.WithCancel(context.Background())
 
-	for idx := 1; idx <= numNodes; idx++ {
-		go remoteWorker(ctx, log, fmt.Sprintf("%s:%d", cluster, idx), workChannel, responseChannel)
+	for n := 0; n < 4; n++ {
+		for idx := 1; idx <= numNodes; idx++ {
+			go remoteWorker(ctx, log, fmt.Sprintf("%s:%d", cluster, idx), workChannel, responseChannel)
+		}
 	}
 
 	var wg sync.WaitGroup
