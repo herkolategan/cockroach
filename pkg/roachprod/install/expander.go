@@ -14,15 +14,21 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/errors"
 )
 
+// local:1:t.name=hello
+// local:1:id=55
+
 var parameterRe = regexp.MustCompile(`{[^{}]*}`)
-var pgURLRe = regexp.MustCompile(`{pgurl(:[-,0-9]+)?(:[a-z0-9\-]+)?}`)
+var pgURLRe = regexp.MustCompile(`{pgurl(:[-,0-9]+)?(:[a-z0-9\-]+)?}?(:#[0-9]+)?}`)
 var pgHostRe = regexp.MustCompile(`{pghost(:[-,0-9]+)?}`)
+
+// TODO(Herko): Add port logic here as well
 var pgPortRe = regexp.MustCompile(`{pgport(:[-,0-9]+)?}`)
 var uiPortRe = regexp.MustCompile(`{uiport(:[-,0-9]+)?}`)
 var storeDirRe = regexp.MustCompile(`{store-dir}`)
@@ -121,14 +127,23 @@ func (e *expander) maybeExpandPgURL(
 	if e.pgURLs == nil {
 		e.pgURLs = make(map[string]map[Node]string)
 	}
+	var tenantId int
 	tenant := "system"
 	if m[2] != "" {
 		// Trim off the leading ':' in the capture group.
 		tenant = m[2][1:]
 	}
+	if m[3] != "" {
+		// Trim off the leading ':#' in the capture group.
+		var err error
+		tenantId, err = strconv.Atoi(m[3][2:])
+		if err != nil {
+			return "", false, err
+		}
+	}
 	if e.pgURLs[tenant] == nil {
 		var err error
-		e.pgURLs[tenant], err = c.pgurls(ctx, l, allNodes(len(c.VMs)), tenant)
+		e.pgURLs[tenant], err = c.pgurls(ctx, l, allNodes(len(c.VMs)), tenant, tenantId)
 		if err != nil {
 			return "", false, err
 		}

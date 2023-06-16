@@ -886,7 +886,7 @@ var sqlCmd = &cobra.Command{
 	Long:  "Run `cockroach sql` on a remote cluster.\n",
 	Args:  cobra.MinimumNArgs(1),
 	Run: wrap(func(cmd *cobra.Command, args []string) error {
-		return roachprod.SQL(context.Background(), config.Logger, args[0], secure, tenantName, args[1:])
+		return roachprod.SQL(context.Background(), config.Logger, args[0], secure, tenantName, tenantID, args[1:])
 	}),
 }
 
@@ -1334,6 +1334,45 @@ var updateCmd = &cobra.Command{
 	}),
 }
 
+var startExternalCmd = &cobra.Command{
+	Use:   "start-external <cluster>",
+	Short: "start a tenant",
+	Long:  "start a tenant",
+	Args:  cobra.ExactArgs(1),
+	Run: wrap(func(cmd *cobra.Command, args []string) error {
+		cluster := args[0]
+		clusterSettingsOpts := []install.ClusterSettingOption{
+			install.TagOption(tag),
+			install.PGUrlCertsDirOption(pgurlCertsDir),
+			install.SecureOption(secure),
+			install.UseTreeDistOption(useTreeDist),
+			install.EnvOption(nodeEnv),
+			install.NumRacksOption(numRacks),
+		}
+		return roachprod.StartExternal(context.Background(), config.Logger, cluster, startOpts, clusterSettingsOpts...)
+	}),
+}
+
+var startSharedCmd = &cobra.Command{
+	Use:   "start-shared <cluster> <tenant-name>",
+	Short: "start a shared process tenant",
+	Long:  "start a shared process tenant",
+	Args:  cobra.ExactArgs(2),
+	Run: wrap(func(cmd *cobra.Command, args []string) error {
+		cluster := args[0]
+		tenantName := args[1]
+		clusterSettingsOpts := []install.ClusterSettingOption{
+			install.TagOption(tag),
+			install.PGUrlCertsDirOption(pgurlCertsDir),
+			install.SecureOption(secure),
+			install.UseTreeDistOption(useTreeDist),
+			install.EnvOption(nodeEnv),
+			install.NumRacksOption(numRacks),
+		}
+		return roachprod.StartShared(context.Background(), config.Logger, cluster, tenantName, clusterSettingsOpts...)
+	}),
+}
+
 func main() {
 	_ = roachprod.InitProviders()
 	providerOptsContainer = vm.CreateProviderOptionsContainer()
@@ -1355,6 +1394,8 @@ func main() {
 		startCmd,
 		stopCmd,
 		startTenantCmd,
+		startSharedCmd,
+		startExternalCmd,
 		initCmd,
 		runCmd,
 		signalCmd,

@@ -436,6 +436,7 @@ func SQL(
 	clusterName string,
 	secure bool,
 	tenantName string,
+	tenantID int,
 	cmdArray []string,
 ) error {
 	if err := LoadClusters(); err != nil {
@@ -446,9 +447,9 @@ func SQL(
 		return err
 	}
 	if len(c.Nodes) == 1 {
-		return c.ExecOrInteractiveSQL(ctx, l, tenantName, cmdArray)
+		return c.ExecOrInteractiveSQL(ctx, l, tenantName, tenantID, cmdArray)
 	}
-	return c.ExecSQL(ctx, l, tenantName, cmdArray)
+	return c.ExecSQL(ctx, l, tenantName, tenantID, cmdArray)
 }
 
 // IP gets the ip addresses of the nodes in a cluster.

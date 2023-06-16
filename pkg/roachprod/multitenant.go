@@ -66,7 +66,7 @@ func StartTenant(
 	saveNodes := hc.Nodes
 	hc.Nodes = hc.Nodes[:1]
 	l.Printf("Creating tenant metadata")
-	if err := hc.ExecSQL(ctx, l, "", []string{
+	if err := hc.ExecSQL(ctx, l, "", 0, []string{
 		`-e`,
 		fmt.Sprintf(createTenantIfNotExistsQuery, startOpts.TenantID),
 	}); err != nil {
@@ -96,3 +96,77 @@ SELECT
   )::STRING
   ELSE 'already exists'
   END;`
+
+// EXPERIMENTAL
+///////////////
+
+func StartExternal(
+	ctx context.Context,
+	l *logger.Logger,
+	clusterName string,
+	startOpts install.StartOpts,
+	clusterSettingsOpts ...install.ClusterSettingOption,
+) error {
+	c, err := newCluster(l, clusterName, clusterSettingsOpts...)
+	if err != nil {
+		return err
+	}
+	startOpts.Target = install.StartTenantSQL
+	if startOpts.TenantID < 2 {
+		return errors.Errorf("invalid tenant ID %d (must be 2 or higher)", startOpts.TenantID)
+	}
+
+	// Create tenant, if necessary. We need to run this SQL against a single host,
+	// so temporarily restrict the target nodes to 1.
+	saveNodes := c.Nodes
+	c.Nodes = c.Nodes[:1]
+	l.Printf("Creating tenant metadata")
+	if err := c.ExecSQL(ctx, l, "", 0, []string{
+		`-e`,
+		fmt.Sprintf(createTenantIfNotExistsQuery, startOpts.TenantID),
+	}); err != nil {
+		return err
+	}
+	c.Nodes = saveNodes
+
+	var kvAddrs []string
+	for _, node := range c.Nodes {
+		kvAddrs = append(kvAddrs, fmt.Sprintf("%s:%d", c.Host(node), c.NodePort(node)))
+	}
+	startOpts.KVAddrs = strings.Join(kvAddrs, ",")
+	startOpts.KVCluster = c
+	return c.Start(ctx, l, startOpts)
+}
+
+func StartShared(ctx context.Context,
+	l *logger.Logger,
+	clusterName, tenantName string,
+	clusterSettingsOpts ...install.ClusterSettingOption,
+) error {
+	hc, err := newCluster(l, clusterName, clusterSettingsOpts...)
+	if err != nil {
+		return err
+	}
+	// Create tenant, if necessary. We need to run this SQL against a single host,
+	// so temporarily restrict the target nodes to 1.
+	saveNodes := hc.Nodes
+	hc.Nodes = hc.Nodes[:1]
+	l.Printf("Creating tenant metadata")
+	if err := hc.ExecSQL(ctx, l, "", 0, []string{
+		`-e`,
+		fmt.Sprintf(createSharedTenantQuery, tenantName),
+	}); err != nil {
+		return err
+	}
+	hc.Nodes = saveNodes
+
+	return nil
+}
+
+const createSharedTenantQuery = `
+	CREATE TENANT '%[1]s';
+	ALTER TENANT '%[1]s' START SERVICE SHARED;
+	ALTER TENANT '%[1]s' GRANT CAPABILITY can_view_node_info=true, can_admin_split=true,can_view_tsdb_metrics=true;
+	ALTER TENANT '%[1]s' SET CLUSTER SETTING sql.split_at.allow_for_secondary_tenant.enabled=true;
+	ALTER TENANT '%[1]s' SET CLUSTER SETTING sql.scatter.allow_for_secondary_tenant.enabled=true;
+`

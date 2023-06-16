@@ -1335,9 +1335,9 @@ fi
 %[1]s cert create-client testuser --certs-dir=certs --ca-key=certs/ca.key $TENANT_SCOPE_OPT
 %[1]s cert create-node %[2]s --certs-dir=certs --ca-key=certs/ca.key
 # Pre-create a few tenant-client
-%[1]s cert create-tenant-client 2 %[2]s --certs-dir=certs --ca-key=certs/ca.key
-%[1]s cert create-tenant-client 3 %[2]s --certs-dir=certs --ca-key=certs/ca.key
-%[1]s cert create-tenant-client 4 %[2]s --certs-dir=certs --ca-key=certs/ca.key
+#%[1]s cert create-tenant-client 2 %[2]s --certs-dir=certs --ca-key=certs/ca.key
+#%[1]s cert create-tenant-client 3 %[2]s --certs-dir=certs --ca-key=certs/ca.key
+#%[1]s cert create-tenant-client 4 %[2]s --certs-dir=certs --ca-key=certs/ca.key
 tar cvf %[3]s certs
 `, cockroachNodeBinary(c, 1), strings.Join(nodeNames, " "), certsTarName)
 
@@ -2251,9 +2251,10 @@ func (c *SyncedCluster) Get(
 	return nil
 }
 
+// TODO(Herko) - do tenant options functional style
 // pgurls returns a map of PG URLs for the given nodes.
 func (c *SyncedCluster) pgurls(
-	ctx context.Context, l *logger.Logger, nodes Nodes, tenantName string,
+	ctx context.Context, l *logger.Logger, nodes Nodes, tenantName string, tenantID int,
 ) (map[Node]string, error) {
 	hosts, err := c.pghosts(ctx, l, nodes)
 	if err != nil {
@@ -2261,7 +2262,13 @@ func (c *SyncedCluster) pgurls(
 	}
 	m := make(map[Node]string, len(hosts))
 	for node, host := range hosts {
-		m[node] = c.NodeURL(host, c.NodePort(node), tenantName)
+		var port int
+		if tenantID != 0 {
+			port = c.TenantNodePort(node, tenantID)
+		} else {
+			port = c.NodePort(node)
+		}
+		m[node] = c.NodeURL(host, port, tenantName)
 	}
 	return m, nil
 }

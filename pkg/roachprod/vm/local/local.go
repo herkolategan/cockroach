@@ -195,6 +195,7 @@ func (p *Provider) Create(
 	for _, c := range p.clusters {
 		for i := range c.VMs {
 			portsTaken.Add(c.VMs[i].SQLPort)
+			portsTaken.AddRange(c.VMs[i].TenantSQLPortRange.Start, c.VMs[i].TenantSQLPortRange.End)
 			portsTaken.Add(c.VMs[i].AdminUIPort)
 		}
 	}
@@ -205,30 +206,43 @@ func (p *Provider) Create(
 	// (*port) to be the following value.
 	getPort := func(port *int) int {
 		for portsTaken.Contains(*port) {
-			(*port)++
+			*port++
 		}
 		result := *port
 		portsTaken.Add(result)
-		(*port)++
+		*port++
 		return result
+	}
+
+	getPortRange := func(port *int, size int) vm.PortRange {
+		for portsTaken.Contains(*port) {
+			*port++
+		}
+		resultStart := *port
+		resultEnd := resultStart + size
+		portsTaken.AddRange(resultStart, resultEnd)
+		*port = resultEnd + 1
+		return vm.PortRange{Start: resultStart, End: resultEnd}
 	}
 
 	for i := range names {
 		c.VMs[i] = vm.VM{
-			Name:             "localhost",
-			CreatedAt:        now,
-			Lifetime:         time.Hour,
-			PrivateIP:        "127.0.0.1",
-			Provider:         ProviderName,
-			ProviderID:       ProviderName,
-			PublicIP:         "127.0.0.1",
-			RemoteUser:       config.OSUser.Username,
-			VPC:              ProviderName,
-			MachineType:      ProviderName,
-			Zone:             ProviderName,
-			SQLPort:          getPort(&sqlPort),
-			AdminUIPort:      getPort(&adminUIPort),
-			LocalClusterName: c.Name,
+			Name:                   "localhost",
+			CreatedAt:              now,
+			Lifetime:               time.Hour,
+			PrivateIP:              "127.0.0.1",
+			Provider:               ProviderName,
+			ProviderID:             ProviderName,
+			PublicIP:               "127.0.0.1",
+			RemoteUser:             config.OSUser.Username,
+			VPC:                    ProviderName,
+			MachineType:            ProviderName,
+			Zone:                   ProviderName,
+			SQLPort:                getPort(&sqlPort),
+			AdminUIPort:            getPort(&adminUIPort),
+			TenantSQLPortRange:     getPortRange(&sqlPort, config.DefaultTenantPortRangeSize),
+			TenantAdminUIPortRange: getPortRange(&adminUIPort, config.DefaultTenantPortRangeSize),
+			LocalClusterName:       c.Name,
 		}
 		path := VMDir(c.Name, i+1)
 		err := os.MkdirAll(path, 0755)

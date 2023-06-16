@@ -103,10 +103,18 @@ type VM struct {
 	// Usually config.DefaultSQLPort, except for local clusters.
 	SQLPort int `json:"sql_port"`
 
+	// TenantSQLPortRange is a range of ports available to which a tenant could
+	// be mapped to listen for SQL connections.
+	TenantSQLPortRange PortRange `json:"tenant_sql_port_range"`
+
 	// AdminUIPort is the port on which the cockroach process is listening for
 	// HTTP traffic for the Admin UI.
 	// Usually config.DefaultAdminUIPort, except for local clusters.
 	AdminUIPort int `json:"adminui_port"`
+
+	// TenantAdminUIPortRange is a range of ports available to which a tenant
+	// could be mapped to listen for HTTP traffic for the Admin UI.
+	TenantAdminUIPortRange PortRange `json:"tenant_adminui_port_range"`
 
 	// LocalClusterName is only set for VMs in a local cluster.
 	LocalClusterName string `json:"local_cluster_name,omitempty"`
@@ -367,6 +375,14 @@ type Volume struct {
 	Name               string
 	Labels             map[string]string
 	Size               int
+}
+
+// PortRange is a range of ports.
+type PortRange struct {
+	// Start is the first port in the range.
+	Start int
+	// End is the last port in the range (inclusive).
+	End int
 }
 
 // VolumeCreateOpts groups input callers can provide when creating volumes.

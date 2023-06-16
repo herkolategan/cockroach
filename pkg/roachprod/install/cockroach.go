@@ -294,9 +294,22 @@ func (c *SyncedCluster) NodePort(node Node) int {
 	return c.VMs[node-1].SQLPort
 }
 
+// TenantNodePort returns the SQL port for the given tenant node.
+func (c *SyncedCluster) TenantNodePort(node Node, tenantID int) int {
+	// TODO(Herko): Update
+	r := (c.VMs[node-1].TenantSQLPortRange.End - c.VMs[node-1].TenantSQLPortRange.Start) % tenantID
+	return c.VMs[node-1].TenantSQLPortRange.Start + r
+}
+
 // NodeUIPort returns the AdminUI port for the given node.
 func (c *SyncedCluster) NodeUIPort(node Node) int {
 	return c.VMs[node-1].AdminUIPort
+}
+
+// TenantNodeUIPort returns the AdminUI port for the given node.
+func (c *SyncedCluster) TenantNodeUIPort(node Node, tenantID int) int {
+	r := (c.VMs[node-1].TenantAdminUIPortRange.End - c.VMs[node-1].TenantAdminUIPortRange.Start) % tenantID
+	return c.VMs[node-1].TenantAdminUIPortRange.Start + r
 }
 
 // ExecOrInteractiveSQL ssh's onto a single node and executes `./ cockroach sql`
@@ -306,22 +319,31 @@ func (c *SyncedCluster) NodeUIPort(node Node) int {
 //
 // CAUTION: this function should not be used by roachtest writers. Use ExecSQL below.
 func (c *SyncedCluster) ExecOrInteractiveSQL(
-	ctx context.Context, l *logger.Logger, tenantName string, args []string,
+	ctx context.Context, l *logger.Logger, tenantName string, tenantID int, args []string,
 ) error {
 	if len(c.Nodes) != 1 {
 		return fmt.Errorf("invalid number of nodes for interactive sql: %d", len(c.Nodes))
 	}
-	url := c.NodeURL("localhost", c.NodePort(c.Nodes[0]), tenantName)
+	// TODO(Herko): Add error handling here etc.
+	var port int
+	if tenantID != 0 {
+		port = c.TenantNodePort(c.Nodes[0], tenantID)
+	} else {
+		port = c.NodePort(c.Nodes[0])
+	}
+	url := c.NodeURL("localhost", port, tenantName)
 	binary := cockroachNodeBinary(c, c.Nodes[0])
 	allArgs := []string{binary, "sql", "--url", url}
 	allArgs = append(allArgs, ssh.Escape(args))
 	return c.SSH(ctx, l, []string{"-t"}, allArgs)
 }
 
+// TODO(Herko): introduce tenant opts here / or connection opts
+
 // ExecSQL runs a `cockroach sql` .
 // It is assumed that the args include the -e flag.
 func (c *SyncedCluster) ExecSQL(
-	ctx context.Context, l *logger.Logger, tenantName string, args []string,
+	ctx context.Context, l *logger.Logger, tenantName string, tenantID int, args []string,
 ) error {
 	type result struct {
 		node   Node
@@ -337,8 +359,16 @@ func (c *SyncedCluster) ExecSQL(
 		if c.IsLocal() {
 			cmd = fmt.Sprintf(`cd %s ; `, c.localVMDir(node))
 		}
+		// TODO(Herko): update / check if both tenant name and node port is specified and add error then
+		var port int
+		if tenantID == 0 {
+			port = c.NodePort(node)
+		} else {
+			port = c.TenantNodePort(node, tenantID)
+		}
+
 		cmd += cockroachNodeBinary(c, node) + " sql --url " +
-			c.NodeURL("localhost", c.NodePort(node), tenantName) + " " +
+			c.NodeURL("localhost", port, tenantName) + " " +
 			ssh.Escape(args)
 
 		sess := c.newSession(l, node, cmd, withDebugName("run-sql"))
@@ -522,11 +552,12 @@ func (c *SyncedCluster) generateStartArgs(
 	}
 
 	if startOpts.Target == StartTenantSQL {
-		args = append(args, fmt.Sprintf("--sql-addr=%s:%d", listenHost, c.NodePort(node)))
+		args = append(args, fmt.Sprintf("--sql-addr=%s:%d", listenHost, c.TenantNodePort(node, startOpts.TenantID)))
+		args = append(args, fmt.Sprintf("--http-addr=%s:%d", listenHost, c.TenantNodeUIPort(node, startOpts.TenantID)))
 	} else {
 		args = append(args, fmt.Sprintf("--listen-addr=%s:%d", listenHost, c.NodePort(node)))
+		args = append(args, fmt.Sprintf("--http-addr=%s:%d", listenHost, c.NodeUIPort(node)))
 	}
-	args = append(args, fmt.Sprintf("--http-addr=%s:%d", listenHost, c.NodeUIPort(node)))
 
 	if !c.IsLocal() {
 		advertiseHost := ""
@@ -535,6 +566,7 @@ func (c *SyncedCluster) generateStartArgs(
 		} else {
 			advertiseHost = c.VMs[node-1].PrivateIP
 		}
+		// TODO(Herko): set port here
 		args = append(args,
 			fmt.Sprintf("--advertise-addr=%s:%d", advertiseHost, c.NodePort(node)),
 		)

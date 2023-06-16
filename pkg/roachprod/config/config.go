@@ -86,6 +86,10 @@ const (
 	// listening for HTTP connections for the Admin UI.
 	DefaultAdminUIPort = 26258
 
+	// DefaultTenantPortRangeSize is the default number of ports reserver for
+	// tenant processes.
+	DefaultTenantPortRangeSize = 32
+
 	// DefaultNumFilesLimit is the default limit on the number of files that can
 	// be opened by the process.
 	DefaultNumFilesLimit = 65 << 13

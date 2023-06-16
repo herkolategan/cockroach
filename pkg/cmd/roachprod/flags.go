@@ -48,6 +48,7 @@ var (
 	listPattern           string
 	secure                = false
 	tenantName            string
+	tenantID              int
 	extraSSHOptions       = ""
 	nodeEnv               []string
 	tag                   string
@@ -354,9 +355,19 @@ Default is "RECURRING '*/15 * * * *' FULL BACKUP '@hourly' WITH SCHEDULE OPTIONS
 		cmd.Flags().BoolVar(&secure,
 			"secure", false, "use a secure cluster")
 	}
+
+	// TODO(Herko): Clean-up
+
 	for _, cmd := range []*cobra.Command{pgurlCmd, sqlCmd} {
 		cmd.Flags().StringVar(&tenantName,
 			"tenant-name", "", "specific tenant to connect to")
+		cmd.Flags().IntVar(&tenantID,
+			"tenant-id", 0, "specific external tenant ID to connect to")
+	}
+
+	for _, cmd := range []*cobra.Command{startExternalCmd} {
+		cmd.Flags().IntVar(&startOpts.TenantID,
+			"tenant-id", 0, "external tenant ID")
 	}
 
 }
