@@ -38,7 +38,6 @@ go_library(
         "//pkg/storage",
         "//pkg/testutils/skip",
         "//pkg/testutils/sqlutils",
-        "//pkg/util",
         "//pkg/util/envutil",
         "//pkg/util/hlc",
         "//pkg/util/httputil",
