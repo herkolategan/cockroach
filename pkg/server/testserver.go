@@ -616,7 +616,7 @@ func (ts *testServer) startDefaultTestTenant(ctx context.Context) (serverutils.A
 
 func (ts *testServer) startSharedProcessDefaultTestTenant(ctx context.Context) (serverutils.ApplicationLayerInterface, error) {
 	params := base.TestSharedProcessTenantArgs{
-		TenantName:  "tenant-3",
+		TenantName:  "tenant-30",
 		TenantID:    serverutils.SharedProcessTestTenantID(),
 		Knobs:       ts.params.Knobs,
 		UseDatabase: ts.params.UseDatabase,
@@ -1295,6 +1295,26 @@ func (ts *testServer) StartSharedProcessTenant(
 	// Wait for the rangefeed to catch up.
 	if err := ts.WaitForTenantReadiness(ctx, tenantID); err != nil {
 		return nil, nil, err
+	}
+
+	// TODO(herko): Combine StartTenant / StartSharedProcessTenant to some degree?
+	for _, setting := range []settings.Setting{
+		sql.SecondaryTenantScatterEnabled,
+		sql.SecondaryTenantSplitAtEnabled,
+		sql.SecondaryTenantZoneConfigsEnabled,
+		sql.SecondaryTenantsMultiRegionAbstractionsEnabled,
+	} {
+		// Update the override for this setting. We need to do this
+		// instead of calling .Override() on the setting directly: certain
+		// tests expect to be able to change the value afterwards using
+		// another ALTER VC SET CLUSTER SETTING statement, which is not
+		// possible with regular overrides.
+		_, err := ie.Exec(ctx, "testserver-alter-tenant-cap", nil,
+			fmt.Sprintf("ALTER VIRTUAL CLUSTER [$1] SET CLUSTER SETTING %s = true", setting.Name()), tenantID.ToUint64())
+		if err != nil {
+			log.Infof(ctx, "ignoring error changing setting because SkipTenantCheck is true: %v", err)
+			return nil, nil, err
+		}
 	}
 
 	// Instantiate the tenant server.
