@@ -47,16 +47,31 @@ func NewTestURL(path string) TestURL {
 	return TestURL{u}
 }
 
-// WithPath is a helper that allows the user of the `TestURL` to easily
-// append paths to use for testing. Please be aware that your path will
-// automatically be escaped for you, but if it includes any invalid hex
-// escapes (eg: `%s`) it will fail silently and you'll get back a blank
-// URL.
+// WithPath is a helper that allows the user of the `TestURL` to easily append
+// paths to use for testing. Any queries in the path will be appended to the
+// existing URL. Please be aware that your path will automatically be escaped
+// for you, but if it includes any invalid hex escapes (eg: `%s`) it will fail
+// silently and you'll get back a blank URL.
 func (t *TestURL) WithPath(path string) *TestURL {
-	newPath, err := url.JoinPath(t.Path, path)
+	parsedPath, err := url.Parse(path)
+	if err != nil {
+		panic(err)
+	}
+
+	// Append the path to the existing path (The paths use here do not contain any
+	// query parameters).
+	newPath, err := url.JoinPath(t.Path, parsedPath.Path)
 	if err != nil {
 		panic(err)
 	}
 	t.Path = newPath
+
+	// Append the query parameters to the existing query parameters.
+	query := t.Query()
+	for k, v := range parsedPath.Query() {
+		query[k] = v
+	}
+	t.RawQuery = query.Encode()
+
 	return t
 }
