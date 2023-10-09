@@ -17,6 +17,7 @@ import (
 	"context"
 	gosql "database/sql"
 	"net/http"
+	"net/url"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/config"
@@ -184,16 +185,24 @@ type ApplicationLayerInterface interface {
 	// string results in DefaultDatabaseName being used.
 	SQLConn(t TestFataler, dbName string) *gosql.DB
 
-	// SQLConnE is like SQLConn but it allows the test to check the error.
+	// SQLConnE is like SQLConn, but it allows the test to check the error.
 	SQLConnE(dbName string) (*gosql.DB, error)
 
 	// SQLConnForUser is like SQLConn but allows the test to specify a
 	// username.
 	SQLConnForUser(t TestFataler, userName, dbName string) *gosql.DB
 
-	// SQLConnForUserE is like SQLConnForUser but it allows the test to
+	// SQLConnForUserE is like SQLConnForUser, but it allows the test to
 	// check the error.
 	SQLConnForUserE(userName, dbName string) (*gosql.DB, error)
+
+	// SQLConnWithOptionalClientCerts is like SQLConn, but the caller can customize whether the
+	// client certificates are loaded on-disk and in the URL.
+	SQLConnWithOptionalClientCerts(t TestFataler, user *url.Userinfo, dbName string, withClientCerts bool) *gosql.DB
+
+	// SQLConnWithOptionalClientCertsE is like SQLConnWithOptionalClientCerts, but
+	// it allows the test to check the error.
+	SQLConnWithOptionalClientCertsE(user *url.Userinfo, dbName string, withClientCerts bool) (*gosql.DB, error)
 
 	// DB returns a handle to the cluster's KV interface.
 	DB() *kv.DB

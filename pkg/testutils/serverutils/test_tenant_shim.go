@@ -59,7 +59,7 @@ func (t *TestURL) WithPath(path string) *TestURL {
 	}
 	// Append the path to the existing path (The paths used here do not contain any
 	// query parameters). To prevent double escaping, we use the `JoinPath` method.
-	t.URL = t.JoinPath(parsedPath.String())
+	t.URL = t.JoinPath(parsedPath.EscapedPath())
 	// Append the query parameters to the existing query parameters.
 	query := t.Query()
 	for k, v := range parsedPath.Query() {

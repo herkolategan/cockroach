@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -493,12 +494,30 @@ func (ts *testServer) SQLConnE(dbName string) (*gosql.DB, error) {
 
 // SQLConnForUserE is part of the serverutils.ApplicationLayerInterface.
 func (ts *testServer) SQLConnForUserE(userName string, dbName string) (*gosql.DB, error) {
+	return ts.SQLConnWithOptionalClientCertsE(url.User(userName), dbName, true /* withClientCerts */)
+}
+
+// SQLConnWithOptionalClientCerts is part of the serverutils.ApplicationLayerInterface.
+func (ts *testServer) SQLConnWithOptionalClientCerts(
+	test serverutils.TestFataler, user *url.Userinfo, dbName string, withClientCerts bool,
+) *gosql.DB {
+	db, err := ts.SQLConnWithOptionalClientCertsE(user, dbName, withClientCerts)
+	if err != nil {
+		test.Fatal(err)
+	}
+	return db
+}
+
+// SQLConnWithOptionalClientCertsE is part of the serverutils.ApplicationLayerInterface.
+func (ts *testServer) SQLConnWithOptionalClientCertsE(user *url.Userinfo, dbName string, withClientCerts bool) (*gosql.DB, error) {
 	return openTestSQLConn(
-		userName, dbName, catconstants.SystemTenantName,
+		user,
+		dbName, catconstants.SystemTenantName,
 		ts.Stopper(),
 		ts.topLevelServer.loopbackPgL,
 		ts.cfg.SQLAdvertiseAddr,
 		ts.cfg.Insecure,
+		withClientCerts,
 	)
 }
 
@@ -915,6 +934,22 @@ func (t *testTenant) SQLConnE(dbName string) (*gosql.DB, error) {
 
 // SQLConnForUserE is part of the serverutils.ApplicationLayerInterface.
 func (t *testTenant) SQLConnForUserE(userName string, dbName string) (*gosql.DB, error) {
+	return t.SQLConnWithOptionalClientCertsE(url.User(userName), dbName, true /* withClientCerts */)
+}
+
+// SQLConnWithOptionalClientCerts is part of the serverutils.ApplicationLayerInterface.
+func (t *testTenant) SQLConnWithOptionalClientCerts(
+	test serverutils.TestFataler, user *url.Userinfo, dbName string, withClientCerts bool,
+) *gosql.DB {
+	db, err := t.SQLConnWithOptionalClientCertsE(user, dbName, withClientCerts)
+	if err != nil {
+		test.Fatal(err)
+	}
+	return db
+}
+
+// SQLConnWithOptionalClientCertsE is part of the serverutils.ApplicationLayerInterface.
+func (t *testTenant) SQLConnWithOptionalClientCertsE(user *url.Userinfo, dbName string, withClientCerts bool) (*gosql.DB, error) {
 	tenantName := t.t.tenantName
 	if !t.Cfg.DisableSQLListener {
 		// This tenant server has its own SQL listener. It will not accept
@@ -922,11 +957,13 @@ func (t *testTenant) SQLConnForUserE(userName string, dbName string) (*gosql.DB,
 		tenantName = ""
 	}
 	return openTestSQLConn(
-		userName, dbName, tenantName,
+		user,
+		dbName, tenantName,
 		t.AppStopper(),
 		t.pgL,
 		t.Cfg.SQLAdvertiseAddr,
 		t.Cfg.Insecure,
+		withClientCerts,
 	)
 }
 
@@ -942,9 +979,9 @@ func (t *testTenant) PGServer() interface{} {
 
 // PGPreServer exposes the pgwire.PreServeConnHandler instance used by
 // the testServer.
-func (ts *testTenant) PGPreServer() interface{} {
-	if ts != nil {
-		return ts.pgPreServer
+func (t *testTenant) PGPreServer() interface{} {
+	if t != nil {
+		return t.pgPreServer
 	}
 	return nil
 }

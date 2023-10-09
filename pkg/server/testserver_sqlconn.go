@@ -45,14 +45,15 @@ const useLoopbackListener = false
 // openTestSQLConn is a test helper that supports the SQLConn* methods
 // of serverutils.ApplicationLayerInterface.
 func openTestSQLConn(
-	userName, dbName string,
+	user *url.Userinfo,
+	dbName string,
 	tenantName roachpb.TenantName,
 	stopper *stop.Stopper,
 	// When useLoopbackListener is set, only this is used:
 	pgL *netutil.LoopbackListener,
 	// When useLoopbackListener is not set, this is used:
 	sqlAddr string,
-	insecure bool,
+	insecure, withClientCerts bool,
 ) (*gosql.DB, error) {
 	cleanupFn := func() {}
 	var goDB *gosql.DB
@@ -68,7 +69,7 @@ func openTestSQLConn(
 	if useLoopbackListener {
 		pgurl := url.URL{
 			Scheme:   "postgres",
-			User:     url.User(userName),
+			User:     user,
 			Host:     "unused",
 			Path:     dbName,
 			RawQuery: opts.Encode(),
@@ -83,7 +84,9 @@ func openTestSQLConn(
 	} else /* useLoopbackListener == false */ {
 		var pgURL url.URL
 		var err error
-		pgURL, cleanupFn, err = sqlutils.PGUrlE(sqlAddr, "openTestSQLConn", url.User(userName))
+		pgURL, cleanupFn, err = sqlutils.PGUrlWithOptionalClientCertsE(
+			sqlAddr, "openTestSQLConn", user, withClientCerts,
+		)
 		if err != nil {
 			return nil, err
 		}
