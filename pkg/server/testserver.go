@@ -616,8 +616,8 @@ func (ts *testServer) startDefaultTestTenant(ctx context.Context) (serverutils.A
 
 func (ts *testServer) startSharedProcessDefaultTestTenant(ctx context.Context) (serverutils.ApplicationLayerInterface, error) {
 	params := base.TestSharedProcessTenantArgs{
-		TenantName:  "tenant-30",
-		TenantID:    serverutils.SharedProcessTestTenantID(),
+		TenantName:  "tenant-10", // TODO(herko): fix this
+		TenantID:    serverutils.TestTenantID(),
 		Knobs:       ts.params.Knobs,
 		UseDatabase: ts.params.UseDatabase,
 	}

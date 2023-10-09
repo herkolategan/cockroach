@@ -348,13 +348,6 @@ func TestTenantID3() roachpb.TenantID {
 	return roachpb.MustMakeTenantID(securitytest.EmbeddedTenantIDs()[2])
 }
 
-// SharedProcessTestTenantID returns a roachpb.TenantID that can be used when
-// starting a shared process test Tenant. The returned tenant IDs match those
-// built into the test certificates.
-func SharedProcessTestTenantID() roachpb.TenantID {
-	return roachpb.MustMakeTenantID(securitytest.EmbeddedTenantIDs()[4])
-}
-
 // GetJSONProto uses the supplied client to GET the URL specified by the parameters
 // and unmarshals the result into response.
 func GetJSONProto(ts ApplicationLayerInterface, path string, response protoutil.Message) error {
