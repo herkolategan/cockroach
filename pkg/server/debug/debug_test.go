@@ -180,6 +180,10 @@ func TestAdminDebugAuth(t *testing.T) {
 // TestAdminDebugRedirect verifies that the /debug/ endpoint is redirected to on
 // incorrect /debug/ paths.
 func TestAdminDebugRedirect(t *testing.T) {
+	// TODO(herko): BROKEN_TEST this test is actually broken
+	// The redirect does not pass back the query parameters onto the redirect
+	// Make an issue11
+
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	s := serverutils.StartServerOnly(t, base.TestServerArgs{})
@@ -187,7 +191,7 @@ func TestAdminDebugRedirect(t *testing.T) {
 	ts := s.ApplicationLayer()
 
 	expURL := debugURL(ts, "")
-	origURL := expURL + "incorrect"
+	origURL := debugURL(ts, "/incorrect")
 
 	// Must be admin to access debug endpoints
 	client, err := ts.GetAdminHTTPClient()
