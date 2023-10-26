@@ -254,12 +254,12 @@ var (
 	// cluster on a probabilistic basis. It will also prevent the
 	// starting of additional virtual clusters by raising an error if it
 	// is attempted. This is the default behavior.
-	TestTenantProbabilisticOnly = DefaultTestTenantOptions{allowAdditionalTenants: false}
+	TestTenantProbabilisticOnly = DefaultTestTenantOptions{testBehavior: ttEnabled | ttSharedProcess, allowAdditionalTenants: false}
 
 	// TestTenantProbabilistic starts the test under a virtual
 	// cluster on a probabilistic basis. It allows the starting of
 	// additional virtual clusters.
-	TestTenantProbabilistic = DefaultTestTenantOptions{allowAdditionalTenants: true}
+	TestTenantProbabilistic = DefaultTestTenantOptions{testBehavior: ttEnabled | ttSharedProcess, allowAdditionalTenants: true}
 
 	// TestTenantAlwaysEnabled will always redirect the test workload to
 	// a virtual cluster. This is useful for quickly verifying that a
