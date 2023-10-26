@@ -32,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -102,7 +101,7 @@ func ShouldStartDefaultTestTenant(
 	case baseArg.ExternalProcessMode():
 		shared = false
 	default:
-		shared = util.ConstantWithMetamorphicTestBoolWithoutLogging("test-tenant-shared-process", false)
+		shared = true // util.ConstantWithMetamorphicTestBoolWithoutLogging("test-tenant-shared-process", false)
 	}
 
 	// Explicit case for enabling the default test tenant, but with a
@@ -142,14 +141,16 @@ func ShouldStartDefaultTestTenant(
 	// Note: we ask the metamorphic framework for a "disable" value, instead
 	// of an "enable" value, because it probabilistically returns its default value
 	// more often than not and that is what we want.
-	enabled := !util.ConstantWithMetamorphicTestBoolWithoutLogging("disable-test-tenant", false)
-	if enabled && t != nil {
-		t.Log(defaultTestTenantMessage)
-	}
-	if enabled {
-		return base.InternalNonDefaultDecision(baseArg, true /* enable */, shared /* shared */)
-	}
-	return base.InternalNonDefaultDecision(baseArg, false /* enable */, false /* shared */)
+	//enabled := !util.ConstantWithMetamorphicTestBoolWithoutLogging("disable-test-tenant", false)
+	//if enabled && t != nil {
+	//	t.Log(defaultTestTenantMessage)
+	//}
+	//if enabled {
+	//	return base.InternalNonDefaultDecision(baseArg, true /* enable */, shared /* shared */)
+	//}
+	//return base.InternalNonDefaultDecision(baseArg, false /* enable */, false /* shared */)
+	t.Log(defaultTestTenantMessage)
+	return base.InternalNonDefaultDecision(baseArg, true /* enable */, shared /* shared */)
 }
 
 // globalDefaultSelectionOverride is used when an entire package needs
