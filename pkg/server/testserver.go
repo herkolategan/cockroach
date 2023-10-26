@@ -758,16 +758,14 @@ func (ts *testServer) grantDefaultSharedProcessCapabilities(
 		return err
 	}
 	err := execSQL("set-tenant-capability",
-		`ALTER TENANT [$1] GRANT CAPABILITY can_debug_process=true,can_use_nodelocal_storage=true,can_admin_split=true`,
+		`ALTER TENANT [$1] GRANT CAPABILITY can_use_nodelocal_storage=true`,
 		tenID.ToUint64(),
 	)
 	if err != nil {
 		return err
 	}
 	if err := ts.WaitForTenantCapabilities(ctx, tenID, map[tenantcapabilities.ID]string{
-		tenantcapabilities.CanDebugProcess:        "true",
 		tenantcapabilities.CanUseNodelocalStorage: "true",
-		tenantcapabilities.CanAdminSplit:          "true",
 	}, ""); err != nil {
 		return err
 	}
