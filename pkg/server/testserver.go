@@ -1392,7 +1392,7 @@ func (ts *testServer) StartSharedProcessTenant(
 		drain:          sqlServerWrapper.drainServer,
 	}
 
-	if err = ts.grantDefaultTenantCapabilities(ctx, args.TenantID, args.SkipTenantCheck); err != nil {
+	if err = ts.grantDefaultTenantCapabilities(ctx, tenantID, args.SkipTenantCheck); err != nil {
 		return nil, nil, err
 	}
 
