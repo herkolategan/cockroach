@@ -1277,7 +1277,9 @@ func createInstanceTemplate(clusterName string, instanceArgs []string, labelsArg
 }
 
 // createInstanceGroups creates an instance group in each zone, for the cluster
-func createInstanceGroups(project, clusterName string, zones []string, opts vm.CreateOpts) error {
+func createInstanceGroups(
+	project, clusterName string, usedRegions []string, regionZones map[string][]string, opts vm.CreateOpts,
+) error {
 	groupName := instanceGroupName(clusterName)
 	templateName := instanceTemplateName(clusterName)
 	// Note that we set the IP addresses to be stateful, so that they remain the
@@ -1287,6 +1289,7 @@ func createInstanceGroups(project, clusterName string, zones []string, opts vm.C
 		"--size", "0",
 		"--stateful-external-ip", "enabled,auto-delete=on-permanent-instance-deletion",
 		"--stateful-internal-ip", "enabled,auto-delete=on-permanent-instance-deletion",
+		"--instance-redistribution-type", "NONE",
 		"--project", project,
 		groupName}
 
@@ -1309,8 +1312,19 @@ func createInstanceGroups(project, clusterName string, zones []string, opts vm.C
 	createGroupArgs = append(createGroupArgs, statefulDiskArgs...)
 
 	var g errgroup.Group
-	for _, zone := range zones {
-		argsWithZone := append(createGroupArgs[:len(createGroupArgs):len(createGroupArgs)], "--zone", zone)
+
+	for region, zones := range regionZones {
+		skip := true
+		for _, usedRegion := range usedRegions {
+			if region == usedRegion {
+				skip = false
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		argsWithZone := append(createGroupArgs[:len(createGroupArgs):len(createGroupArgs)], "--zones", strings.Join(zones, ","))
 		g.Go(func() error {
 			cmd := exec.Command("gcloud", argsWithZone...)
 			output, err := cmd.CombinedOutput()
@@ -1324,12 +1338,12 @@ func createInstanceGroups(project, clusterName string, zones []string, opts vm.C
 }
 
 // waitForGroupStability waits for the instance groups, in the given zones, to become stable.
-func waitForGroupStability(project, groupName string, zones []string) error {
+func waitForGroupStability(project, groupName string, regions []string) error {
 	// Wait for group to become stable // zone TBD
 	var g errgroup.Group
-	for _, zone := range zones {
+	for _, region := range regions {
 		groupStableArgs := []string{"compute", "instance-groups", "managed", "wait-until", "--stable",
-			"--zone", zone,
+			"--region", region,
 			"--project", project,
 			groupName}
 		g.Go(func() error {
@@ -1385,15 +1399,22 @@ func (p *Provider) Create(
 		return err
 	}
 
-	// Work out in which zones VMs should be created.
-	nodeZones := vm.ZonePlacement(len(zones), len(names))
-	// N.B. when len(zones) > len(names), we don't need to map unused zones
-	zoneToHostNames := make(map[string][]string, min(len(zones), len(names)))
-	for i, name := range names {
-		zone := zones[nodeZones[i]]
-		zoneToHostNames[zone] = append(zoneToHostNames[zone], name)
+	regionZones := make(map[string][]string)
+	for _, zone := range zones {
+		region := zone[:strings.LastIndex(zone, "-")]
+		regionZones[region] = append(regionZones[region], zone)
 	}
-	usedZones := maps.Keys(zoneToHostNames)
+	regions := maps.Keys(regionZones)
+
+	// Work out in which zones VMs should be created.
+	nodeRegions := vm.ZonePlacement(len(regions), len(names))
+	// N.B. when len(zones) > len(names), we don't need to map unused zones
+	regionToHostNames := make(map[string][]string, min(len(regions), len(names)))
+	for i, name := range names {
+		region := regions[nodeRegions[i]]
+		regionToHostNames[region] = append(regionToHostNames[region], name)
+	}
+	usedRegions := maps.Keys(regionToHostNames)
 
 	switch {
 	case providerOpts.Managed:
@@ -1402,7 +1423,7 @@ func (p *Provider) Create(
 		if err != nil {
 			return err
 		}
-		err = createInstanceGroups(project, opts.ClusterName, usedZones, opts)
+		err = createInstanceGroups(project, opts.ClusterName, usedRegions, regionZones, opts)
 		if err != nil {
 			return err
 		}
@@ -1412,10 +1433,10 @@ func (p *Provider) Create(
 			"--project", project,
 			groupName}
 
-		l.Printf("Creating %d managed instances, distributed across [%s]", len(names), strings.Join(usedZones, ", "))
-		for zone, zoneHosts := range zoneToHostNames {
-			argsWithZone := append(createArgs[:len(createArgs):len(createArgs)], "--zone", zone)
-			for _, host := range zoneHosts {
+		l.Printf("Creating %d managed instances, distributed across [%s]", len(names), strings.Join(usedRegions, ", "))
+		for region, regionHosts := range regionToHostNames {
+			argsWithZone := append(createArgs[:len(createArgs):len(createArgs)], "--region", region)
+			for _, host := range regionHosts {
 				argsWithHost := append(argsWithZone[:len(argsWithZone):len(argsWithZone)], []string{"--instance", host}...)
 				g.Go(func() error {
 					cmd := exec.Command("gcloud", argsWithHost...)
@@ -1431,11 +1452,41 @@ func (p *Provider) Create(
 		if err != nil {
 			return err
 		}
-		err = waitForGroupStability(project, groupName, usedZones)
+		err = waitForGroupStability(project, groupName, usedRegions)
 		if err != nil {
 			return err
 		}
+
+		listDiskArgs := []string{
+			"compute",
+			"disks",
+			"list",
+			"--project", project,
+			"--format", "json",
+			"--filter", fmt.Sprintf("name~%s-\\d{4}$", opts.ClusterName),
+		}
+
+		var disks []describeVolumeCommandResponse
+		if err := runJSONCommand(listDiskArgs, &disks); err != nil {
+			return err
+		}
+		zoneToHostNames := make(map[string][]string)
+		for _, disk := range disks {
+			zoneToHostNames[disk.Zone] = append(zoneToHostNames[disk.Zone], disk.Name)
+		}
+
+		return propagateDiskLabels(l, project, labels, zoneToHostNames, opts.SSDOpts.UseLocalSSD)
 	default:
+		// Work out in which zones VMs should be created.
+		nodeZones := vm.ZonePlacement(len(zones), len(names))
+		// N.B. when len(zones) > len(names), we don't need to map unused zones
+		zoneToHostNames := make(map[string][]string, min(len(zones), len(names)))
+		for i, name := range names {
+			zone := zones[nodeZones[i]]
+			zoneToHostNames[zone] = append(zoneToHostNames[zone], name)
+		}
+		usedZones := maps.Keys(zoneToHostNames)
+
 		var g errgroup.Group
 		createArgs := []string{"compute", "instances", "create", "--subnet", "default"}
 		createArgs = append(createArgs, "--labels", labels)
@@ -1459,8 +1510,8 @@ func (p *Provider) Create(
 		if err != nil {
 			return err
 		}
+		return propagateDiskLabels(l, project, labels, zoneToHostNames, opts.SSDOpts.UseLocalSSD)
 	}
-	return propagateDiskLabels(l, project, labels, zoneToHostNames, opts.SSDOpts.UseLocalSSD)
 }
 
 // computeGrowDistribution computes the distribution of new nodes across the
@@ -1669,9 +1720,10 @@ func listInstanceTemplates(project string) ([]jsonInstanceTemplate, error) {
 }
 
 type jsonManagedInstanceGroup struct {
-	Name string `json:"name"`
-	Zone string `json:"zone"`
-	Size int    `json:"size"`
+	Name   string `json:"name"`
+	Zone   string `json:"zone"`
+	Region string `json:"region"`
+	Size   int    `json:"size"`
 }
 
 // listManagedInstanceGroups returns a list of managed instance groups for a
@@ -1739,7 +1791,7 @@ func (p *Provider) deleteManaged(l *logger.Logger, vms vm.List) error {
 		for _, group := range projectGroups {
 			argsWithZone := []string{"compute", "instance-groups", "managed", "delete", "--quiet",
 				"--project", project,
-				"--zone", group.Zone,
+				"--region", group.Region,
 				group.Name}
 			g.Go(func() error {
 				cmd := exec.Command("gcloud", argsWithZone...)
