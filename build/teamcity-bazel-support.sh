@@ -29,19 +29,22 @@ run_bazel() {
     # Set up volumes.
     # TeamCity uses git alternates, so make sure we mount the path to the real
     # git objects.
-    teamcity_alternates="/home/agent/system/git"
-    vols="--volume ${teamcity_alternates}:${teamcity_alternates}:ro"
+    #teamcity_alternates="/home/agent/system/git"
+    #vols="--volume ${teamcity_alternates}:${teamcity_alternates}:ro"
+    vols=""
     artifacts_dir=$root/artifacts
     mkdir -p "$artifacts_dir"
+    #chown 501:501 $artifacts_dir
     vols="${vols} --volume ${artifacts_dir}:/artifacts"
-    cache=/home/agent/.bzlhome
+    cache=bzlhome #/Users/herko/.bzlhome
     mkdir -p $cache
+    #chown 501:501 $cache
     vols="${vols} --volume ${root}:/go/src/github.com/cockroachdb/cockroach"
-    vols="${vols} --volume ${cache}:/home/roach"
+    vols="${vols} --volume ${cache}:/home/roach:delegated"
 
     exit_status=0
     docker run -i ${tty-} --rm --init \
-        -u "$(id -u):$(id -g)" \
+        -u "501:501" \
         --workdir="/go/src/github.com/cockroachdb/cockroach" \
 	${DOCKER_EXPORT_COCKROACH_VARS} \
 	${BAZEL_SUPPORT_EXTRA_DOCKER_ARGS:+$BAZEL_SUPPORT_EXTRA_DOCKER_ARGS} \
