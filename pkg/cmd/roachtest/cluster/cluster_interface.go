@@ -38,6 +38,11 @@ type Cluster interface {
 	Nodes(ns ...int) option.NodeListOption
 	Node(i int) option.NodeListOption
 
+	// Resize cluster.
+
+	Grow(ctx context.Context, l *logger.Logger, nodeCount int) error
+	Shrink(ctx context.Context, l *logger.Logger, nodeCount int) error
+
 	// Uploading and downloading from/to nodes.
 
 	Get(ctx context.Context, l *logger.Logger, src, dest string, opts ...option.Option) error
