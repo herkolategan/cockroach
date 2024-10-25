@@ -73,3 +73,15 @@ gomock(
         "//pkg/gen:__pkg__",
     ],
 )
+
+gomock(
+    name = "clusterstats_test_mock",
+    out = "mocks_generated_test_test.go",
+    interfaces = ["Test"],
+    library = "//pkg/cmd/roachtest/test",
+    package = "clusterstats",
+    visibility = [
+        ":__pkg__",
+        "//pkg/gen:__pkg__",
+    ],
+)
