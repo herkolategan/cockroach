@@ -1641,7 +1641,7 @@ VERSION=$(%[1]s version --build-tag)
 VERSION=${VERSION::5}
 TENANT_SCOPE_OPT=""
 if [[ $VERSION = v22.2 ]]; then
-       TENANT_SCOPE_OPT="--tenant-scope 1,2,3,4,11,12,13,14"
+       TENANT_SCOPE_OPT="--tenant-scope $(echo {1..100} | tr ' ' ',')"
 fi
 %[1]s cert create-ca --certs-dir=certs --ca-key=certs/ca.key
 %[1]s cert create-client root --certs-dir=certs --ca-key=certs/ca.key $TENANT_SCOPE_OPT
