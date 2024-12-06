@@ -33,6 +33,7 @@ func registerAcceptance(r registry.Registry) {
 		randomized         bool
 		workloadNode       bool
 		incompatibleClouds registry.CloudSet
+		skipPostValidation registry.PostValidation
 	}{
 		// NOTE: acceptance tests are lightweight tests that run as part
 		// of CI. As such, they must:
@@ -44,7 +45,7 @@ func registerAcceptance(r registry.Registry) {
 		// properties, please register it separately (not as an acceptance
 		// test).
 		registry.OwnerKV: {
-			{name: "decommission-self", fn: runDecommissionSelf},
+			{name: "decommission-self", fn: runDecommissionSelf, skipPostValidation: registry.PostValidationNoDeadNodes},
 			{name: "event-log", fn: runEventLog},
 			{name: "gossip/peerings", fn: runGossipPeerings},
 			{name: "gossip/restart", fn: runGossipRestart},
@@ -60,7 +61,7 @@ func registerAcceptance(r registry.Registry) {
 			},
 			{name: "cli/node-status", fn: runCLINodeStatus},
 			{name: "cluster-init", fn: runClusterInit},
-			{name: "rapid-restart", fn: runRapidRestart},
+			{name: "rapid-restart", fn: runRapidRestart, skipPostValidation: registry.PostValidationNoDeadNodes},
 		},
 		registry.OwnerObservability: {
 			{name: "status-server", fn: runStatusServer},
@@ -139,16 +140,17 @@ func registerAcceptance(r registry.Registry) {
 			}
 
 			testSpec := registry.TestSpec{
-				Name:              "acceptance/" + tc.name,
-				Owner:             owner,
-				Cluster:           r.MakeClusterSpec(numNodes, extraOptions...),
-				Skip:              tc.skip,
-				EncryptionSupport: tc.encryptionSupport,
-				Timeout:           10 * time.Minute,
-				CompatibleClouds:  registry.AllClouds.Remove(tc.incompatibleClouds),
-				Suites:            registry.Suites(registry.Nightly, registry.Quick, registry.Acceptance),
-				Randomized:        tc.randomized,
-				RequiresLicense:   tc.requiresLicense,
+				Name:                "acceptance/" + tc.name,
+				Owner:               owner,
+				Cluster:             r.MakeClusterSpec(numNodes, extraOptions...),
+				Skip:                tc.skip,
+				EncryptionSupport:   tc.encryptionSupport,
+				Timeout:             10 * time.Minute,
+				CompatibleClouds:    registry.AllClouds.Remove(tc.incompatibleClouds),
+				Suites:              registry.Suites(registry.Nightly, registry.Quick, registry.Acceptance),
+				Randomized:          tc.randomized,
+				RequiresLicense:     tc.requiresLicense,
+				SkipPostValidations: tc.skipPostValidation,
 			}
 
 			if tc.timeout != 0 {
