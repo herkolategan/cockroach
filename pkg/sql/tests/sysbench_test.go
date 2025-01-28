@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/testutils/benchmark"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -687,6 +688,11 @@ func BenchmarkSysbench(b *testing.B) {
 		b.Run(driver.name, func(b *testing.B) {
 			for _, workload := range workloads {
 				b.Run(workload.name, func(b *testing.B) {
+					// Skip the check run (it's only useful for time vs iterations!)
+					if b.N <= 1 {
+						return
+					}
+
 					defer func() {
 						if r := recover(); r != nil {
 							b.Fatalf("%+v", r)
@@ -697,14 +703,25 @@ func BenchmarkSysbench(b *testing.B) {
 					sys, cleanup := driver.constructorFn(ctx, b)
 					defer cleanup()
 
-					rng := rand.New(rand.NewSource(0))
+					//rng := rand.New(rand.NewSource(0))
+					rng, _ := randutil.NewTestRand()
 					sys.prep(rng)
 
+					// Warmup
+					for i := 0; i < 250; i++ {
+						workload.opFn(sys, rng)
+					}
+
+					scatterPlot := benchmark.NewScatterPlot(b)
+					defer scatterPlot.Stop(b)
+
 					defer startAllocsProfile(b).Stop(b)
+					scatterPlot.Start()
 					defer b.StopTimer()
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
 						workload.opFn(sys, rng)
+						scatterPlot.Measure(i)
 					}
 				})
 			}
