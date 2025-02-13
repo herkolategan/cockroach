@@ -112,27 +112,45 @@ func (c CompareResults) writeJSONSummary(path string) error {
 	}
 	defer file.Close()
 	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	type (
+		Data struct {
+			Metric  string
+			Summary benchmath.Summary
+			Sample  benchmath.Sample
+		}
+		Entry struct {
+			Name       string
+			Count      int
+			Iterations int
+			Data       map[string][]Data
+		}
+	)
 
-	type Data struct {
-		Metric  string
-		Summary benchmath.Summary
-	}
-	data := make(map[string][]Data)
-	for _, cr := range c {
+	entries := make([]Entry, len(c))
+	for idx, cr := range c {
+		data := make(map[string][]Data)
 		for name, m := range cr.MetricMap {
 			for _, r := range []Revision{Old, New} {
 				data[string(r)] = append(data[string(r)], Data{
 					Metric:  name,
 					Summary: *m.BenchmarkEntries[cr.EntryName].Summaries[string(r)],
+					Sample:  *m.BenchmarkEntries[cr.EntryName].Samples[string(r)],
 				})
 			}
 		}
+		entries[idx] = Entry{
+			Name:       cr.Benchmark.Name,
+			Count:      cr.Benchmark.MeasureCount,
+			Iterations: cr.Benchmark.Measure.Iterations,
+			Data:       data,
+		}
 	}
 	return encoder.Encode(struct {
-		Summaries map[string][]Data
+		Entries   []Entry
 		Revisions Revisions
 	}{
-		Summaries: data,
+		Entries:   entries,
 		Revisions: suite.Revisions,
 	})
 }
